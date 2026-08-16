@@ -1,0 +1,1237 @@
+{
+  "version": 1,
+  "description": "Single source of truth \u2014 employees, permissions, roles, sidebar. Edit this file only.",
+  "access_control": {
+    "version": 1,
+    "description": "Edit this file to add modules, permissions, roles, or sidebar items without changing Dart code. Restart app after changes. API endpoint /access-control/config can override this at runtime.",
+    "modules": [
+      {
+        "id": "dashboard",
+        "name": "Dashboard",
+        "icon": "dashboard_outlined",
+        "route": "/dashboard",
+        "section": "main",
+        "order": 1,
+        "entry_permission": "dashboard.view",
+        "permissions": [
+          {
+            "key": "dashboard.view",
+            "label": "View Dashboard",
+            "is_entry": true
+          }
+        ]
+      },
+      {
+        "id": "tasks",
+        "name": "Tasks",
+        "icon": "task_alt_outlined",
+        "route": "/tasks",
+        "section": "main",
+        "order": 2,
+        "entry_permission": "tasks.view",
+        "permissions": [
+          {
+            "key": "tasks.view",
+            "label": "View Tasks",
+            "is_entry": true
+          },
+          {
+            "key": "tasks.manage",
+            "label": "Assign Tasks"
+          }
+        ]
+      },
+      {
+        "id": "inventory",
+        "name": "Inventory",
+        "icon": "inventory_2_outlined",
+        "route": "/inventory",
+        "section": "operations",
+        "order": 8,
+        "entry_permission": "inventory.view",
+        "permissions": [
+          {
+            "key": "inventory.view",
+            "label": "View Inventory",
+            "is_entry": true
+          },
+          {
+            "key": "inventory.add",
+            "label": "Add Inventory"
+          },
+          {
+            "key": "inventory.edit",
+            "label": "Edit Inventory"
+          },
+          {
+            "key": "inventory.delete",
+            "label": "Delete Inventory"
+          }
+        ]
+      },
+      
+      {
+        "id": "checkin",
+        "name": "Check-In / Check-Out",
+        "icon": "swap_horiz_outlined",
+        "route": "/checkin",
+        "section": "operations",
+        "order": 6,
+        "entry_permission": "checkin.view",
+        "permissions": [
+          {
+            "key": "checkin.view",
+            "label": "View Transactions",
+            "is_entry": true
+          },
+          {
+            "key": "checkin.create",
+            "label": "Create Check-In"
+          },
+          {
+            "key": "checkout.create",
+            "label": "Create Check-Out"
+          }
+        ]
+      },
+
+      {
+        "id": "items",
+        "name": "Items",
+        "icon": "category_outlined",
+        "route": "/items",
+        "section": "operations",
+        "order": 2,
+        "entry_permission": "items.view",
+        "permissions": [
+          {
+            "key": "items.view",
+            "label": "View Items",
+            "is_entry": true
+          },
+          {
+            "key": "items.manage",
+            "label": "Manage Items"
+          }
+        ]
+      },
+
+      {
+        "id": "workflow",
+        "name": "Create Workflow",
+        "icon": "account_tree_outlined",
+        "route": "/workflow",
+        "section": "operations",
+        "order": 3,
+        "entry_permission": "workflow.view",
+        "permissions": [
+          {
+            "key": "workflow.view",
+            "label": "View Workflow",
+            "is_entry": true
+          },
+          {
+            "key": "workflow.move",
+            "label": "Move Products Between Stages"
+          },
+          {
+            "key": "workflow.update_status",
+            "label": "Update Stage Status"
+          }
+        ]
+      },
+
+      {
+        "id": "production",
+        "name": "Production",
+        "icon": "precision_manufacturing_outlined",
+        "route": "/production",
+        "section": "operations",
+        "order": 3,
+        "entry_permission": "production.view",
+        "permissions": [
+          {
+            "key": "production.view",
+            "label": "View Production",
+            "is_entry": true
+          },
+          {
+            "key": "production.update",
+            "label": "Update Production Status"
+          }
+        ]
+      },
+
+      {
+        "id": "quality",
+        "name": "Quality",
+        "icon": "verified_outlined",
+        "route": "/quality",
+        "section": "operations",
+        "order": 4,
+        "entry_permission": "quality.view",
+        "permissions": [
+          {
+            "key": "quality.view",
+            "label": "View Quality Queue",
+            "is_entry": true
+          },
+          {
+            "key": "quality.inspect",
+            "label": "Perform Inspection"
+          },
+          {
+            "key": "quality.approve",
+            "label": "Approve / Reject Batch"
+          }
+        ]
+      },
+
+      {
+        "id": "rejection",
+        "name": "Rejection",
+        "icon": "cancel_outlined",
+        "route": "/rejection",
+        "section": "operations",
+        "order": 6,
+        "entry_permission": "rejection.view",
+        "permissions": [
+          {
+            "key": "rejection.view",
+            "label": "View Rejections",
+            "is_entry": true
+          },
+          {
+            "key": "rejection.create",
+            "label": "Create Rejection Entry"
+          },
+          {
+            "key": "rejection.edit",
+            "label": "Edit Rejection Records"
+          }
+        ]
+      },
+
+      {
+        "id": "gauge",
+        "name": "Gauge Management",
+        "icon": "straighten_outlined",
+        "route": "/gauge-management",
+        "section": "operations",
+        "order": 10,
+        "entry_permission": "gauge.view",
+        "permissions": [
+          {
+            "key": "gauge.view",
+            "label": "View Instruments",
+            "is_entry": true
+          },
+          {
+            "key": "gauge.add",
+            "label": "Add Instrument"
+          },
+          {
+            "key": "gauge.edit",
+            "label": "Edit Instrument"
+          },
+          {
+            "key": "gauge.delete",
+            "label": "Delete Instrument"
+          },
+          {
+            "key": "gauge.record_calibration",
+            "label": "Record Calibration"
+          },
+          {
+            "key": "gauge.upload_certificate",
+            "label": "Upload Calibration Certificate"
+          }
+        ]
+      },
+
+      {
+        "id": "finished_goods",
+        "name": "Finished Goods",
+        "icon": "check_circle_outline",
+        "route": "/finished-goods",
+        "section": "operations",
+        "order": 5,
+        "entry_permission": "finished_goods.view",
+        "permissions": [
+          {
+            "key": "finished_goods.view",
+            "label": "View Finished Goods",
+            "is_entry": true
+          },
+          {
+            "key": "finished_goods.manage",
+            "label": "Manage Finished Goods"
+          }
+        ]
+      },
+
+      {
+        "id": "clients",
+        "name": "Clients",
+        "icon": "people_outline",
+        "route": "/clients",
+        "section": "main",
+        "order": 2,
+        "entry_permission": "clients.view",
+        "permissions": [
+          {
+            "key": "clients.view",
+            "label": "View Clients",
+            "is_entry": true
+          },
+          {
+            "key": "clients.manage",
+            "label": "Manage Clients"
+          }
+        ]
+      },
+
+      {
+        "id": "sales_tracking",
+        "name": "Sales Tracking",
+        "icon": "point_of_sale_outlined",
+        "route": "/sales-tracking",
+        "section": "main",
+        "order": 3,
+        "entry_permission": "sales_tracking.view",
+        "permissions": [
+          {
+            "key": "sales_tracking.view",
+            "label": "View Sales Tracking",
+            "is_entry": true
+          },
+          {
+            "key": "sales_tracking.manage",
+            "label": "Manage Sales Orders"
+          },
+          {
+            "key": "sales_tracking.create_workflow",
+            "label": "Create Workflow From Sales"
+          }
+        ]
+      },
+
+      {
+        "id": "vendors",
+        "name": "Vendors",
+        "icon": "store_outlined",
+        "route": "/vendors",
+        "section": "main",
+        "order": 4,
+        "entry_permission": "vendors.view",
+        "permissions": [
+          {
+            "key": "vendors.view",
+            "label": "View Vendors",
+            "is_entry": true
+          },
+          {
+            "key": "vendors.manage",
+            "label": "Manage Vendors"
+          }
+        ]
+      },
+
+      {
+        "id": "purchase_requisition",
+        "name": "Purchase Requisition",
+        "icon": "request_quote_outlined",
+        "route": "/purchase-requisition",
+        "section": "operations",
+        "order": 1,
+        "entry_permission": "purchase_requisition.view",
+        "permissions": [
+          {
+            "key": "purchase_requisition.view",
+            "label": "View Purchase Requisitions",
+            "is_entry": true
+          },
+          {
+            "key": "purchase_requisition.manage",
+            "label": "Manage Purchase Requisitions"
+          },
+          {
+            "key": "purchase_requisition.approve",
+            "label": "Approve Purchase Requisitions"
+          }
+        ]
+      },
+
+      {
+        "id": "purchase_order",
+        "name": "Purchase Order",
+        "icon": "shopping_cart_outlined",
+        "route": "/purchase-order",
+        "section": "operations",
+        "order": 2,
+        "entry_permission": "purchase_order.view",
+        "permissions": [
+          {
+            "key": "purchase_order.view",
+            "label": "View Purchase Orders",
+            "is_entry": true
+          },
+          {
+            "key": "purchase_order.manage",
+            "label": "Create Purchase Orders"
+          },
+          {
+            "key": "purchase_order.approve",
+            "label": "Approve / Reject Purchase Orders"
+          }
+        ]
+      },
+
+      {
+        "id": "job_work",
+        "name": "Job Work",
+        "icon": "work_outline",
+        "route": "/job-work",
+        "section": "operations",
+        "order": 7,
+        "entry_permission": "job_work.view",
+        "permissions": [
+          {
+            "key": "job_work.view",
+            "label": "View Job Work",
+            "is_entry": true
+          },
+          {
+            "key": "job_work.manage",
+            "label": "Manage Job Work"
+          }
+        ]
+      },
+
+      {
+        "id": "machinery",
+        "name": "Machinery",
+        "icon": "factory_outlined",
+        "route": "/machinery",
+        "section": "operations",
+        "order": 9,
+        "entry_permission": "machinery.view",
+        "permissions": [
+          {
+            "key": "machinery.view",
+            "label": "View Machinery",
+            "is_entry": true
+          },
+          {
+            "key": "machinery.manage",
+            "label": "Manage Machinery"
+          }
+        ]
+      },
+      {
+        "id": "reports",
+        "name": "Reports",
+        "icon": "bar_chart_outlined",
+        "route": "/reports",
+        "section": "insights",
+        "entry_permission": "reports.view",
+        "permissions": [
+          {
+            "key": "reports.view",
+            "label": "View Reports",
+            "is_entry": true
+          },
+          {
+            "key": "reports.export",
+            "label": "Export Reports"
+          }
+        ]
+      },
+      {
+        "id": "notifications",
+        "name": "Notifications",
+        "icon": "notifications_outlined",
+        "route": "/notifications",
+        "section": "insights",
+        "entry_permission": "notifications.view",
+        "permissions": [
+          {
+            "key": "notifications.view",
+            "label": "View Notifications",
+            "is_entry": true
+          }
+        ]
+      },
+      {
+        "id": "audit_logs",
+        "name": "Audit Logs",
+        "icon": "history_outlined",
+        "route": "/audit-logs",
+        "section": "admin",
+        "entry_permission": "audit.view",
+        "permissions": [
+          {
+            "key": "audit.view",
+            "label": "View Audit Logs",
+            "is_entry": true
+          }
+        ]
+      },
+      {
+        "id": "users",
+        "name": "Users",
+        "icon": "people_outline",
+        "route": "/users",
+        "section": "admin",
+        "entry_permission": "users.view",
+        "permissions": [
+          {
+            "key": "users.view",
+            "label": "View Users",
+            "is_entry": true
+          },
+          {
+            "key": "users.create",
+            "label": "Create Users"
+          },
+          {
+            "key": "users.update",
+            "label": "Update Users"
+          },
+          {
+            "key": "users.assign_permissions",
+            "label": "Assign Permissions"
+          },
+          {
+            "key": "users.deactivate",
+            "label": "Deactivate Users"
+          },
+          {
+            "key": "users.delete",
+            "label": "Delete Users"
+          }
+        ]
+      },
+      {
+        "id": "settings",
+        "name": "Settings",
+        "icon": "settings_outlined",
+        "route": "/settings",
+        "section": "admin",
+        "entry_permission": "settings.view",
+        "permissions": [
+          {
+            "key": "settings.view",
+            "label": "View Settings",
+            "is_entry": true
+          }
+        ]
+      }
+    ],
+    "roles": [
+      {
+        "key": "admin",
+        "label": "Admin",
+        "permissions": [
+          "*"
+        ]
+      },
+      {
+        "key": "production_manager",
+        "label": "Production Manager",
+        "permissions": [
+          "dashboard.view",
+          "tasks.view",
+          "inventory.view",
+          "items.view",
+          "items.manage",
+          "workflow.view",
+          "workflow.move",
+          "workflow.update_status",
+          "production.view",
+          "production.update",
+          "quality.view",
+          "quality.inspect",
+          "quality.approve",
+          "rejection.view",
+          "rejection.create",
+          "rejection.edit",
+          "gauge.view",
+          "gauge.record_calibration",
+          "finished_goods.view",
+          "sales_tracking.view",
+          "sales_tracking.manage",
+          "sales_tracking.create_workflow",
+          "machinery.view",
+          "machinery.manage",
+          "reports.view",
+          "reports.export",
+          "checkin.view",
+          "notifications.view"
+        ]
+      },
+      {
+        "key": "store_manager",
+        "label": "Store Manager",
+        "permissions": [
+          "dashboard.view",
+          "tasks.view",
+          "inventory.view",
+          "inventory.add",
+          "inventory.edit",
+          "items.view",
+          "items.manage",
+          "checkin.view",
+          "checkin.create",
+          "checkout.create",
+          "gauge.view",
+          "finished_goods.view",
+          "finished_goods.manage",
+          "quality.view",
+          "quality.inspect",
+          "quality.approve",
+          "clients.view",
+          "sales_tracking.view",
+          "sales_tracking.manage",
+          "vendors.view",
+          "vendors.manage",
+          "purchase_requisition.view",
+          "purchase_requisition.manage",
+          "purchase_requisition.approve",
+          "purchase_order.view",
+          "purchase_order.manage",
+          "purchase_order.approve",
+          "machinery.view",
+          "reports.view",
+          "notifications.view"
+        ]
+      },
+      {
+        "key": "supervisor",
+        "label": "Supervisor",
+        "permissions": [
+          "dashboard.view",
+          "tasks.view",
+          "inventory.view",
+          "checkin.view",
+          "checkin.create",
+          "checkout.create",
+          "items.view",
+          "items.manage",
+          "workflow.view",
+          "workflow.move",
+          "production.view",
+          "job_work.view",
+          "job_work.manage",
+          "quality.view",
+          "quality.inspect",
+          "quality.approve",
+          "rejection.view",
+          "rejection.create",
+          "rejection.edit",
+          "gauge.view",
+          "gauge.add",
+          "gauge.edit",
+          "gauge.record_calibration",
+          "gauge.upload_certificate",
+          "finished_goods.view",
+          "machinery.view",
+          "machinery.manage",
+          "reports.view",
+          "notifications.view"
+        ]
+      },
+      {
+        "key": "operator",
+        "label": "Operator",
+        "permissions": [
+          "dashboard.view",
+          "tasks.view",
+          "inventory.view",
+          "checkin.view",
+          "items.view",
+          "workflow.view",
+          "workflow.move",
+          "production.view",
+          "rejection.view",
+          "rejection.create",
+          "gauge.view"
+        ]
+      },
+      {
+        "key": "quality_inspector",
+        "label": "Quality Inspector",
+        "permissions": [
+          "dashboard.view",
+          "tasks.view",
+          "quality.view",
+          "quality.inspect",
+          "quality.approve",
+          "rejection.view",
+          "gauge.view",
+          "inventory.view",
+          "finished_goods.view",
+          "notifications.view"
+        ]
+      }
+    ],
+    "sidebar": {
+      "main": {
+        "extras": []
+      },
+      "operations": {
+        "extras": []
+      },
+      "admin": {
+        "extras": []
+      }
+    }
+  },
+  "permission_flow": [
+    {
+      "order": 1,
+      "title": "Create Employee Account",
+      "description": "Admin adds employee with name, email, role and login credentials",
+      "icon": "person_add_outlined"
+    },
+    {
+      "order": 2,
+      "title": "Assign Role",
+      "description": "Each role (Admin, Manager, Operator, etc.) has default module access",
+      "icon": "badge_outlined"
+    },
+    {
+      "order": 3,
+      "title": "Customize Permissions",
+      "description": "Admin can grant or revoke specific actions per employee if needed",
+      "icon": "tune_outlined"
+    },
+    {
+      "order": 4,
+      "title": "Employee Login",
+      "description": "User signs in with their email and password",
+      "icon": "login"
+    },
+    {
+      "order": 5,
+      "title": "Access Applied",
+      "description": "Only allowed menus, screens and buttons are visible to the user",
+      "icon": "verified_user_outlined"
+    },
+    {
+      "order": 6,
+      "title": "Daily Work",
+      "description": "Employee performs only the tasks they are permitted to do",
+      "icon": "work_outline"
+    }
+  ],
+  "clients": [
+    {
+      "id": 1,
+      "name": "ESCORTS KUBOTA LIMITED",
+      "contact_person": "Harish Kumar",
+      "email": "harish@nationalelectric.pk",
+      "phone": "+91 98765 43210",
+      "address": "Plot 12, Industrial Area",
+      "city": "Agra",
+      "status": "active",
+      "total_orders": 48,
+      "last_order_date": "2024-01-15",
+      "created_at": "2023-04-10",
+      "items": [
+        { "item_id": 1, "default_qty": 500 }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "ACTION CONSTRUCTION EQUIPMENT LIMITED(DHATIR)",
+      "contact_person": "Ramesh Singh",
+      "email": "ramesh@metroeng.com",
+      "phone": "+91 87654 32109",
+      "address": "Sector F-7, Main Boulevard",
+      "city": "Jaipur",
+      "status": "active",
+      "total_orders": 32,
+      "last_order_date": "2024-01-12",
+      "created_at": "2023-06-22",
+      "items": [
+        { "item_id": 2, "default_qty": 150 }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "ACTION CONSTRUCTION EQUIPMENT LIMITED(P8)",
+      "contact_person": "Harsh Arora",
+      "email": "harsh@gulfmotors.pk",
+      "phone": "+91 76543 21098",
+      "address": "Hub Industrial Zone",
+      "city": "Jaipur",
+      "status": "active",
+      "total_orders": 21,
+      "last_order_date": "2024-01-08",
+      "created_at": "2023-08-05",
+      "items": [
+        { "item_id": 1, "default_qty": 300 },
+        { "item_id": 2, "default_qty": 80 }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "ACTION CONSTRUCTION EQUIPMENT LIMITED(PLANT 2)",
+      "contact_person": "Rakhi Sharma",
+      "email": "Rakhi@precisiontools.pk",
+      "phone": "+91 98765 43211",
+      "address": "22-A Faisalabad Road",
+      "city": "Jaipur",
+      "status": "inactive",
+      "total_orders": 9,
+      "last_order_date": "2023-11-20",
+      "created_at": "2023-10-01",
+      "items": [
+        { "item_id": 3, "default_qty": 40 }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "ACTION CONSTRUCTION EQUIPMENT LIMITED(PLANT 6)",
+      "contact_person": "Pankaj Mehta",
+      "email": "pankaj@alphadist.pk",
+      "phone": "+91 98765 43212",
+      "address": "Warehouse 4, GT Road",
+      "city": "Ajmer",
+      "status": "active",
+      "total_orders": 15,
+      "last_order_date": "2024-01-10",
+      "created_at": "2023-12-18",
+      "items": [
+        { "item_id": 3, "default_qty": 60 }
+      ]
+    },
+     {
+      "id": 6,
+      "name": "ACTION CONSTRUCTION EQUIPMENT LIMITED(UNIT-IV)",
+      "contact_person": "Pankaj Mehta",
+      "email": "pankaj@alphadist.pk",
+      "phone": "+91 98765 43212",
+      "address": "Warehouse 4, GT Road",
+      "city": "Ajmer",
+      "status": "active",
+      "total_orders": 15,
+      "last_order_date": "2024-01-10",
+      "created_at": "2023-12-18",
+      "items": [
+        { "item_id": 1, "default_qty": 200 },
+        { "item_id": 3, "default_qty": 25 }
+      ]
+    }
+    
+  ],
+  "vendors": [
+    {
+      "id": 1,
+      "name": "SUNRISE STEEL AGENCY",
+      "contact_person": "Vikram Patel",
+      "email": "vikram@steelworks.in",
+      "phone": "+91 98123 45670",
+      "address": "Plot 8, MIDC Industrial Estate",
+      "city": "Pune",
+      "status": "active",
+      "total_orders": 36,
+      "last_order_date": "2024-01-14",
+      "created_at": "2023-05-12",
+      "items": [
+        { "item_id": 1, "default_qty": 500, "rate": 45.0 }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "OM SAI TRADERS",
+      "contact_person": "Anita Desai",
+      "email": "anita@precisionbearings.com",
+      "phone": "+91 98234 56781",
+      "address": "Sector 12, Industrial Area",
+      "city": "Ahmedabad",
+      "status": "active",
+      "total_orders": 28,
+      "last_order_date": "2024-01-11",
+      "created_at": "2023-07-20",
+      "items": [
+        { "item_id": 1, "default_qty": 200, "rate": 320.0 }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "HANUMAN STEELS",
+      "contact_person": "Suresh Nair",
+      "email": "suresh@globalfasteners.in",
+      "phone": "+91 98345 67892",
+      "address": "Unit 5, Peenya Industrial Hub",
+      "city": "Bangalore",
+      "status": "active",
+      "total_orders": 19,
+      "last_order_date": "2024-01-09",
+      "created_at": "2023-09-03",
+      "items": [
+        { "item_id": 1, "default_qty": 1000, "rate": 8.5 }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "EKTA TRADERS",
+      "contact_person": "Meera Iyer",
+      "email": "meera@chemcosupplies.com",
+      "phone": "+91 98456 78903",
+      "address": "22 Industrial Lane",
+      "city": "Chennai",
+      "status": "inactive",
+      "total_orders": 7,
+      "last_order_date": "2023-10-25",
+      "created_at": "2023-11-15",
+      "items": [
+        { "item_id": 2, "default_qty": 100, "rate": 220.0 }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "A.V. Unipack Private Limited",
+      "contact_person": "Rajesh Gupta",
+      "email": "rajesh@electrohub.in",
+      "phone": "+91 98567 89014",
+      "address": "Warehouse 2, GT Road",
+      "city": "Delhi",
+      "status": "active",
+      "total_orders": 22,
+      "last_order_date": "2024-01-13",
+      "created_at": "2023-12-05",
+      "items": [
+        { "item_id": 3, "default_qty": 60, "rate": 350.0 }
+      ]
+    }
+  ],
+  "items": [
+    {
+      "id": 1,
+      "code": "RM-12",
+      "name": "Raw Material",
+      "unit": "pcs",
+      "purchase_price": 45.0,
+      "category": "raw_material",
+      "status": "active"
+    },
+    {
+      "id": 2,
+      "code": "CNC-2",
+      "name": "CNC Insert Etc",
+      "unit": "kg",
+      "purchase_price": 320.0,
+      "category": "raw_material",
+      "status": "active"
+    },
+    {
+      "id": 3,
+      "code": "GMW-25",
+      "name": "Gridnign Machine Wheel",
+      "unit": "mtr",
+      "purchase_price": 12.5,
+      "category": "raw_material",
+      "status": "active"
+    }
+   
+   
+   
+  ],
+  "processes": [
+    {
+      "id": 1,
+      "name": "Welding",
+      "description": "Join materials, usually metals or thermoplastics, by using high heat to melt the parts together and allowing them to cool, causing fusion.",
+      "process_type": "in_house",
+      "rate": 10.0,
+      "unit": "kg",
+      "status": "active"
+    },
+    {
+      "id": 2,
+      "name": "Grinding",
+      "description": "Creating a smooth surface finish on a workpiece.",
+      "process_type": "job_work",
+      "rate": 15.0,
+      "unit": "pcs",
+      "status": "active"
+    }
+  ],
+  "instruments": [
+    {
+      "id": 1,
+      "instrument_id": "MIC-001",
+      "name": "Digital Micrometer 0-25mm",
+      "category": "Measuring",
+      "type": "Measuring",
+      "location": "QC Lab — Bay 2",
+      "interval_months": 12,
+      "last_calibration_date": "2025-12-15",
+      "next_due_date": "2026-12-15",
+      "status": "active",
+      "calibration_history": []
+    },
+    {
+      "id": 2,
+      "instrument_id": "VEN-014",
+      "name": "Vernier Caliper 300mm",
+      "category": "Measuring",
+      "type": "Measuring",
+      "location": "Machining — Line 1",
+      "interval_months": 6,
+      "last_calibration_date": "2026-01-10",
+      "next_due_date": "2026-07-10",
+      "status": "active",
+      "calibration_history": []
+    },
+    {
+      "id": 3,
+      "instrument_id": "PRG-008",
+      "name": "Dial Pressure Gauge 0-10 bar",
+      "category": "Pressure",
+      "type": "Pressure",
+      "location": "Hydraulic Test Bench",
+      "interval_months": 12,
+      "last_calibration_date": "2025-06-01",
+      "next_due_date": "2026-06-01",
+      "status": "active",
+      "calibration_history": []
+    },
+    {
+      "id": 4,
+      "instrument_id": "CMM-002",
+      "name": "Coordinate Measuring Machine",
+      "category": "CMM",
+      "type": "CMM",
+      "location": "Quality Lab",
+      "interval_months": 12,
+      "last_calibration_date": "2025-11-20",
+      "next_due_date": "2026-02-20",
+      "status": "active",
+      "calibration_history": []
+    }
+  ],
+  "machinery": [
+    {
+      "id": 1,
+      "sequence": 1,
+      "machine_code": "CNC-001",
+      "name": "Bansaw Machine",
+      "type": "Raw",
+      "location": "Machining Bay 1",
+      "capacity": "500 units/day",
+      "manufacturer": "Haas Automation",
+      "status": "active",
+      "default_stage": "Raw Material Cutting"
+    },
+    {
+      "id": 2,
+      "sequence": 2,
+      "machine_code": "LAT-002",
+      "name": "Lathe Machine",
+      "type": "Lathe",
+      "location": "Machining Bay 2",
+      "capacity": "300 units/day",
+      "manufacturer": "DMG Mori",
+      "status": "active",
+      "default_stage": "Part Center & Faching"
+    },
+    {
+      "id": 3,
+      "sequence": 3,
+      "machine_code": "ASM-004",
+      "name": "SPM Machine",
+      "type": "Assembly",
+      "location": "Assembly Floor",
+      "capacity": "800 units/day",
+      "manufacturer": "FlexLink",
+      "status": "active",
+      "default_stage": "Part Center & Faching"
+    },
+    {
+      "id": 4,
+      "sequence": 4,
+      "machine_code": "PRS-003",
+      "name": "CNC Machine",
+      "type": "Press",
+      "location": "Assembly Floor",
+      "capacity": "200 units/day",
+      "manufacturer": "Schuler",
+      "status": "maintenance",
+      "default_stage": "Part Turning & Size"
+    },
+    {
+      "id": 5,
+      "sequence": 5,
+      "machine_code": "CMM-002",
+      "name": "VMC Machine",
+      "type": "CMM",
+      "location": "QC Lab — Bay 2",
+      "capacity": "120 inspections/day",
+      "manufacturer": "Zeiss",
+      "status": "active",
+      "default_stage": "Part Drilling , Silot"
+    },
+     {
+      "id": 6,
+      "sequence": 6,
+      "machine_code": "CMM-002",
+      "name": "MNTR",
+      "type": "CMM",
+      "location": "QC Lab — Bay 2",
+      "capacity": "120 inspections/day",
+      "manufacturer": "Zeiss",
+      "status": "active",
+      "default_stage": "Part Drilling , Silot,etc"
+    },
+         {
+      "id": 7,
+      "sequence": 7,
+      "machine_code": "CMM-002",
+      "name": "Induction Machine",
+      "type": "CMM",
+      "location": "QC Lab — Bay 2",
+      "capacity": "120 inspections/day",
+      "manufacturer": "Zeiss",
+      "status": "active",
+      "default_stage": "Part Hard"
+    },     {
+      "id": 8,
+      "sequence": 8,
+      "machine_code": "CMM-002",
+      "name": "Grinding Machine",
+      "type": "CMM",
+      "location": "QC Lab — Bay 2",
+      "capacity": "120 inspections/day",
+      "manufacturer": "Zeiss",
+      "status": "active",
+      "default_stage": "Sharpening & Smoothing."
+    },
+       {
+      "id": 9,
+      "sequence": 9,
+      "machine_code": "CMM-002",
+      "name": "Welding Machine",
+      "type": "CMM",
+      "location": "QC Lab — Bay 2",
+      "capacity": "120 inspections/day",
+      "manufacturer": "Zeiss",
+      "status": "active",
+      "default_stage": "Fusing"
+    }
+  ],
+  "job_designations": [
+    {
+      "key": "machine_operator",
+      "label": "Machine Operator",
+      "requires_machinery": true
+    },
+    {
+      "key": "gauge_operator",
+      "label": "Gauge Operator"
+    },
+    {
+      "key": "security_guard",
+      "label": "Security Guard"
+    },
+    {
+      "key": "store_keeper",
+      "label": "Store Keeper"
+    },
+    {
+      "key": "production_operator",
+      "label": "Production Operator"
+    },
+    {
+      "key": "quality_inspector",
+      "label": "Quality Inspector"
+    },
+    {
+      "key": "maintenance_technician",
+      "label": "Maintenance Technician"
+    },
+    {
+      "key": "supervisor",
+      "label": "Floor Supervisor"
+    },
+    {
+      "key": "admin_staff",
+      "label": "Admin Staff"
+    },
+    {
+      "key": "other",
+      "label": "Other"
+    }
+  ],
+  "employees": [
+    {
+      "id": 1,
+      "name": "Harish Kumar",
+      "email": "harish@nationalelectric.pk",
+      "role": "admin",
+      "department": "Administration",
+      "is_active": true,
+      "permissions": null,
+      "last_login": "2024-01-17 09:00",
+      "created_at": "2023-06-01"
+    },
+    {
+      "id": 2,
+      "name": "Ramesh Singh",
+      "email": "ramesh@nationalelectric.pk",
+      "role": "production_manager",
+      "department": "Production",
+      "is_active": true,
+      "permissions": null,
+      "last_login": "2024-01-17 08:30",
+      "created_at": "2023-07-15"
+    },
+    {
+      "id": 3,
+      "name": "Harsh Arora",
+      "email": "harsh@nationalelectric.pk",
+      "role": "store_manager",
+      "department": "Store",
+      "is_active": true,
+      "permissions": null,
+      "last_login": "2024-01-17 08:45",
+      "created_at": "2023-07-20"
+    },
+    {
+      "id": 4,
+      "name": "Rakhi Sharma",
+      "email": "rakhi@nationalelectric.pk",
+      "role": "supervisor",
+      "department": "Quality",
+      "is_active": true,
+      "permissions": null,
+      "last_login": "2024-01-17 09:15",
+      "created_at": "2023-08-01"
+    },
+    {
+      "id": 5,
+      "name": "Pankaj Mehta",
+      "email": "pankaj@nationalelectric.pk",
+      "role": "operator",
+      "department": "Production",
+      "is_active": true,
+      "permissions": null,
+      "last_login": "2024-01-16 17:00",
+      "created_at": "2023-09-10"
+    },
+    {
+      "id": 6,
+      "name": "Jaideep Singh",
+      "email": "jaideep@nationalelectric.pk",
+      "role": "operator",
+      "department": "Production",
+      "is_active": false,
+      "permissions": null,
+      "last_login": "2024-01-10 12:00",
+      "created_at": "2023-10-05"
+    }
+  ]
+}
