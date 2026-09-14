@@ -63,6 +63,11 @@ class ProductionBatch extends Model
         return $this->belongsTo(Workflow::class);
     }
 
+    public function workOrder(): BelongsTo
+    {
+        return $this->belongsTo(WorkOrder::class);
+    }
+
     public function parentBatch(): BelongsTo
     {
         return $this->belongsTo(self::class, 'parent_batch_id');

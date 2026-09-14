@@ -143,6 +143,47 @@ class PermissionService
         return $this->permissionsForRole($user->role);
     }
 
+    public function roleHasWildcard(string $role): bool
+    {
+        foreach ($this->roles() as $roleConfig) {
+            if (($roleConfig['key'] ?? '') !== $role) {
+                continue;
+            }
+
+            return in_array('*', $roleConfig['permissions'] ?? [], true);
+        }
+
+        return false;
+    }
+
+    public function userCan(User $user, string $permission): bool
+    {
+        if ($this->roleHasWildcard($user->role)) {
+            return true;
+        }
+
+        $permissions = $this->permissionsForUser($user);
+
+        return in_array($permission, $permissions, true);
+    }
+
+    public function userCanAny(User $user, array $permissions): bool
+    {
+        if ($this->roleHasWildcard($user->role)) {
+            return true;
+        }
+
+        $granted = $this->permissionsForUser($user);
+
+        foreach ($permissions as $permission) {
+            if (in_array($permission, $granted, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public function userPayload(User $user): array
     {
         $user->loadMissing('machinery');

@@ -12,6 +12,7 @@ class SalesOrder extends Model
         'client_name',
         'item_id',
         'product_name',
+        'items',
         'unit',
         'quantity',
         'available_at_order',
@@ -30,6 +31,7 @@ class SalesOrder extends Model
     protected function casts(): array
     {
         return [
+            'items' => 'array',
             'order_date' => 'date',
             'delivery_date' => 'date',
             'quantity' => 'integer',

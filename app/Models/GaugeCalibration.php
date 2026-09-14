@@ -14,6 +14,7 @@ class GaugeCalibration extends Model
         'performed_by',
         'result',
         'certificate_ref',
+        'document_id',
         'notes',
     ];
 
@@ -28,5 +29,10 @@ class GaugeCalibration extends Model
     public function gauge(): BelongsTo
     {
         return $this->belongsTo(Gauge::class);
+    }
+
+    public function document(): BelongsTo
+    {
+        return $this->belongsTo(Document::class);
     }
 }

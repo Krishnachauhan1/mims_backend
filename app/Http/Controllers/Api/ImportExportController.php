@@ -11,7 +11,9 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ImportExportController extends Controller
 {
-    private const ENTITIES = ['users', 'vendors', 'clients', 'inventory', 'items'];
+    private const ENTITIES = [
+        'users', 'vendors', 'clients', 'inventory', 'items', 'work-orders', 'machinery',
+    ];
 
     public function __construct(
         private SpreadsheetService $spreadsheet,
@@ -26,8 +28,9 @@ class ImportExportController extends Controller
 
         $definition = $this->spreadsheet->templateDefinition($entity);
 
-        return $this->spreadsheet->csvDownload(
-            "{$entity}_template.csv",
+        return $this->downloadSpreadsheet(
+            $entity,
+            $this->spreadsheet->downloadFilename($entity, 'template'),
             $definition['headers'],
             [$definition['sample']],
         );
@@ -42,11 +45,29 @@ class ImportExportController extends Controller
         $definition = $this->spreadsheet->templateDefinition($entity);
         $rows = $this->importer->exportRows($entity);
 
-        return $this->spreadsheet->csvDownload(
-            "{$entity}_export.csv",
+        return $this->downloadSpreadsheet(
+            $entity,
+            $this->spreadsheet->downloadFilename($entity, 'export'),
             $definition['headers'],
             $rows,
         );
+    }
+
+    /**
+     * @param  list<string>  $headers
+     * @param  list<array<string, mixed>>  $rows
+     */
+    private function downloadSpreadsheet(
+        string $entity,
+        string $filename,
+        array $headers,
+        array $rows,
+    ): StreamedResponse {
+        if ($this->spreadsheet->usesExcelFormat($entity)) {
+            return $this->spreadsheet->xlsxDownload($filename, $headers, $rows);
+        }
+
+        return $this->spreadsheet->csvDownload($filename, $headers, $rows);
     }
 
     public function import(Request $request, string $entity): JsonResponse

@@ -12,7 +12,7 @@ class UserDeviceTokenController extends Controller
     public function store(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'token' => 'required|string|max:500',
+            'token' => 'required|string|max:512',
             'platform' => 'nullable|string|max:50',
             'device_name' => 'nullable|string|max:255',
         ]);
@@ -36,7 +36,7 @@ class UserDeviceTokenController extends Controller
     public function destroy(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'token' => 'required|string|max:500',
+            'token' => 'required|string|max:512',
         ]);
 
         UserDeviceToken::query()

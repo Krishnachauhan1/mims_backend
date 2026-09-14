@@ -14,6 +14,20 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->trustProxies(at: '*');
+        $middleware->redirectGuestsTo(function (Request $request): ?string {
+            if ($request->is('api/*') || $request->expectsJson()) {
+                return null;
+            }
+
+            return route('web.login');
+        });
+        $middleware->alias([
+            'permission' => \App\Http\Middleware\EnsurePermission::class,
+        ]);
+        $middleware->api(prepend: [
+            \App\Http\Middleware\HandlePreflightCors::class,
+            \App\Http\Middleware\LogApiRequest::class,
+        ]);
         $middleware->api(append: [
             \App\Http\Middleware\DispatchProductionCompletionReminders::class,
         ]);

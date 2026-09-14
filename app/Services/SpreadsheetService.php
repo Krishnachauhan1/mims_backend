@@ -3,6 +3,9 @@
 namespace App\Services;
 
 use Illuminate\Http\UploadedFile;
+use PhpOffice\PhpSpreadsheet\IOFactory;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class SpreadsheetService
@@ -14,13 +17,62 @@ class SpreadsheetService
     {
         $extension = strtolower($file->getClientOriginalExtension());
         if (in_array($extension, ['xlsx', 'xls'], true)) {
-            throw new \InvalidArgumentException(
-                'Please save your Excel file as CSV (.csv) and upload again. '
-                .'In Excel: File → Save As → CSV UTF-8.',
-            );
+            return $this->parseExcel($file);
         }
 
-        $handle = fopen($file->getRealPath(), 'r');
+        return $this->parseCsvFile($file->getRealPath());
+    }
+
+    /**
+     * @return array{headers: list<string>, rows: list<array<string, string>>}
+     */
+    private function parseExcel(UploadedFile $file): array
+    {
+        try {
+            $spreadsheet = IOFactory::load($file->getRealPath());
+        } catch (\Throwable $exception) {
+            throw new \RuntimeException('Could not read Excel file: '.$exception->getMessage());
+        }
+
+        $sheet = $spreadsheet->getSheet(0);
+        $matrix = $sheet->toArray(null, true, true, false);
+
+        if ($matrix === []) {
+            return ['headers' => [], 'rows' => []];
+        }
+
+        $headerIndex = $this->detectHeaderLineIndexFromMatrix($matrix);
+        $headers = $this->normalizeHeaders(
+            array_map(fn ($value) => trim((string) $value), $matrix[$headerIndex] ?? []),
+        );
+
+        $rows = [];
+        for ($i = $headerIndex + 1, $count = count($matrix); $i < $count; $i++) {
+            $values = array_map(fn ($value) => trim((string) ($value ?? '')), $matrix[$i] ?? []);
+            if ($this->isEmptyRow($values)) {
+                continue;
+            }
+
+            $row = [];
+            foreach ($headers as $index => $header) {
+                if ($header === '') {
+                    continue;
+                }
+                $row[$header] = $values[$index] ?? '';
+            }
+
+            $rows[] = $row;
+        }
+
+        return ['headers' => $headers, 'rows' => $rows];
+    }
+
+    /**
+     * @return array{headers: list<string>, rows: list<array<string, string>>}
+     */
+    private function parseCsvFile(string $path): array
+    {
+        $handle = fopen($path, 'r');
         if ($handle === false) {
             throw new \RuntimeException('Could not read uploaded file.');
         }
@@ -94,6 +146,45 @@ class SpreadsheetService
     }
 
     /**
+     * @param  list<string>  $headers
+     * @param  list<array<string, mixed>>  $rows
+     */
+    public function xlsxDownload(string $filename, array $headers, array $rows): StreamedResponse
+    {
+        return response()->streamDownload(function () use ($headers, $rows): void {
+            $spreadsheet = new Spreadsheet;
+            $sheet = $spreadsheet->getActiveSheet();
+
+            foreach ($headers as $columnIndex => $header) {
+                $sheet->setCellValue([$columnIndex + 1, 1], $header);
+            }
+
+            foreach ($rows as $rowIndex => $row) {
+                foreach ($headers as $columnIndex => $header) {
+                    $sheet->setCellValue([$columnIndex + 1, $rowIndex + 2], $row[$header] ?? '');
+                }
+            }
+
+            $writer = new Xlsx($spreadsheet);
+            $writer->save('php://output');
+        }, $filename, [
+            'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ]);
+    }
+
+    public function usesExcelFormat(string $entity): bool
+    {
+        return $entity === 'machinery';
+    }
+
+    public function downloadFilename(string $entity, string $kind): string
+    {
+        $extension = $this->usesExcelFormat($entity) ? 'xlsx' : 'csv';
+
+        return "{$entity}_{$kind}.{$extension}";
+    }
+
+    /**
      * @return array{headers: list<string>, sample: list<string>}
      */
     public function templateDefinition(string $entity): array
@@ -111,22 +202,22 @@ class SpreadsheetService
             ],
             'vendors' => [
                 'headers' => [
-                    'name', 'contact_person', 'email', 'phone',
+                    'name', 'contact_person', 'email', 'phone', 'gst_number',
                     'address', 'city', 'status',
                 ],
                 'sample' => [
                     'ABC Supplies', 'Raj Kumar', 'sales@abc.com', '9876500001',
-                    'Plot 12 Industrial Area', 'Mumbai', 'active',
+                    '27AABCU9603R1ZM', 'Plot 12 Industrial Area', 'Mumbai', 'active',
                 ],
             ],
             'clients' => [
                 'headers' => [
-                    'name', 'contact_person', 'email', 'phone',
+                    'name', 'contact_person', 'email', 'phone', 'gst_number',
                     'address', 'city', 'status',
                 ],
                 'sample' => [
                     'XYZ Industries', 'Priya Sharma', 'orders@xyz.com', '9876500002',
-                    'Sector 5', 'Pune', 'active',
+                    '27AABCU9603R1ZN', 'Sector 5', 'Pune', 'active',
                 ],
             ],
             'inventory' => [
@@ -141,10 +232,35 @@ class SpreadsheetService
             ],
             'items' => [
                 'headers' => [
-                    'item_code', 'item_description', 'moq', 'unit', 'status',
+                    'item_code', 'category', 'item_description', 'material_grade', 'diameter_mm',
+                    'cutting_weight', 'final_weight', 'cutting_size',
+                    'moq', 'unit', 'status', 'remark', 'inactive_date', 'documents_count',
                 ],
                 'sample' => [
-                    'C7201003', 'PIN', '10', 'pcs', 'active',
+                    'EN18-53', 'raw_material', 'EN18 DIA 53', 'EN18', '53',
+                    '', '', '', '100', 'kg', 'active', '', '', '0',
+                ],
+            ],
+            'work-orders' => [
+                'headers' => [
+                    'route_card_no', 'workflow_name', 'item_code', 'product',
+                    'client_name', 'quantity', 'unit', 'pr_number',
+                    'priority', 'remarks', 'status',
+                ],
+                'sample' => [
+                    'RC-2026-001', 'Standard Manufacturing', 'C7201003', 'PIN',
+                    'XYZ Industries', '100', 'pcs', 'PR-001',
+                    'normal', 'Bulk assign — add machine route in app later', 'pending',
+                ],
+            ],
+            'machinery' => [
+                'headers' => [
+                    'sequence', 'machine_code', 'name', 'type', 'location',
+                    'capacity', 'manufacturer', 'status', 'default_stage', 'notes',
+                ],
+                'sample' => [
+                    '1', 'CNC-001', 'Bansaw Machine', 'Raw', 'Machining Bay 1',
+                    '500 units/day', 'Haas Automation', 'active', 'Raw Material', '',
                 ],
             ],
             default => throw new \InvalidArgumentException("Unknown entity: {$entity}"),
@@ -214,6 +330,14 @@ class SpreadsheetService
     {
         $set = array_flip(array_filter($headers, fn (string $header): bool => $header !== ''));
 
+        if (isset($set['route_card_no']) && isset($set['workflow_name'])) {
+            return true;
+        }
+
+        if (isset($set['machine_code']) && isset($set['name'])) {
+            return true;
+        }
+
         if (isset($set['item_code']) || isset($set['sku']) || isset($set['email'])) {
             return true;
         }
@@ -234,5 +358,24 @@ class SpreadsheetService
         }
 
         return isset($set['name']) && isset($set['type']) && isset($set['quantity']);
+    }
+
+    /**
+     * @param  list<list<mixed>>  $matrix
+     */
+    private function detectHeaderLineIndexFromMatrix(array $matrix): int
+    {
+        $limit = min(count($matrix), 30);
+
+        for ($i = 0; $i < $limit; $i++) {
+            $headers = $this->normalizeHeaders(
+                array_map(fn ($value) => trim((string) ($value ?? '')), $matrix[$i] ?? []),
+            );
+            if ($this->isLikelyHeaderRow($headers)) {
+                return $i;
+            }
+        }
+
+        return 0;
     }
 }

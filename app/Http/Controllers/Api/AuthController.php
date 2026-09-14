@@ -9,6 +9,7 @@ use App\Services\PermissionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
@@ -25,6 +26,11 @@ class AuthController extends Controller
         $user = User::where('email', $request->email)->first();
 
         if (! $user || ! Hash::check($request->password, $user->password)) {
+            Log::warning('[API][auth/login] failed', [
+                'email' => $request->email,
+                'ip' => $request->ip(),
+            ]);
+
             throw ValidationException::withMessages([
                 'email' => ['Invalid credentials.'],
             ]);
@@ -38,6 +44,13 @@ class AuthController extends Controller
 
         $user->update(['last_login_at' => now()]);
         $token = $user->createToken('api-token')->plainTextToken;
+
+        Log::info('[API][auth/login] success', [
+            'user_id' => $user->id,
+            'email' => $user->email,
+            'token_hint' => substr($token, 0, 8).'…',
+            'ip' => $request->ip(),
+        ]);
 
         AuditService::log(
             action: 'User login',

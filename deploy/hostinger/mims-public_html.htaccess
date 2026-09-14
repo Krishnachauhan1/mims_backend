@@ -1,0 +1,28 @@
+# MIMS Flutter web + API proxy (same-origin — fixes cross-domain POST failures)
+# Upload to: ~/domains/mims.powerforceindustries.com/public_html/.htaccess
+
+DirectoryIndex index.html index.php
+
+<IfModule mod_headers.c>
+  Header always set Access-Control-Allow-Origin "*"
+  Header always set Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+  Header always set Access-Control-Allow-Headers "Content-Type, Authorization, Accept, X-Requested-With"
+</IfModule>
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /
+
+    # CORS preflight
+    RewriteCond %{REQUEST_METHOD} OPTIONS
+    RewriteRule ^(.*)$ $1 [R=204,L]
+
+    # Static Flutter build files
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # Laravel API (same install as powerforceindustries.com)
+    RewriteCond %{REQUEST_URI} ^/(api|up)(/|$) [NC]
+    RewriteRule ^ laravel-api-index.php [L]
+</IfModule>

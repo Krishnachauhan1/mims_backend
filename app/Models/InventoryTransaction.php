@@ -17,6 +17,7 @@ class InventoryTransaction extends Model
         'batch_number',
         'po_number',
         'pr_number',
+        'mrn_number',
         'items',
         'notes',
         'status',

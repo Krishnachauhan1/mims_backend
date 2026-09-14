@@ -1,0 +1,25 @@
+# ~/domains/powerforceindustries.com/public_html/.htaccess
+# Website: index.html at /
+# API: /api/* and /up → laravel-api-index.php (copy as index.php on server)
+
+DirectoryIndex index.html index.php
+
+<IfModule mod_headers.c>
+  Header always set Access-Control-Allow-Origin "*"
+  Header always set Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+  Header always set Access-Control-Allow-Headers "Content-Type, Authorization, Accept, X-Requested-With"
+</IfModule>
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /
+
+    # Laravel API (including OPTIONS preflight) — before static files
+    RewriteCond %{REQUEST_URI} ^/(api|up)(/|$) [NC]
+    RewriteRule ^ laravel-api-index.php [L]
+
+    # Existing files & folders (index.html, assets/, public/, etc.)
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+</IfModule>

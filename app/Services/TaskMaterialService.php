@@ -79,6 +79,8 @@ class TaskMaterialService
             WorkOrderMaterial::query()->create([
                 'work_order_id' => $order->id,
                 'inventory_item_id' => $item->id,
+                'grade' => isset($line['grade']) ? strtoupper(trim((string) $line['grade'])) : null,
+                'diameter_mm' => isset($line['diameter_mm']) ? round((float) $line['diameter_mm'], 2) : null,
                 'quantity' => $qty,
                 'unit' => $item->unit,
             ]);

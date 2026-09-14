@@ -7,7 +7,10 @@ use App\Models\PurchaseOrder;
 
 class PurchaseOrderCheckinService
 {
-    public function __construct(private PoCheckinItemService $poItems) {}
+    public function __construct(
+        private PoCheckinItemService $poItems,
+        private MrnNumberService $mrnNumbers,
+    ) {}
 
     public function syncApprovedOrders(): void
     {
@@ -45,7 +48,7 @@ class PurchaseOrderCheckinService
         $totalReceived = $this->poItems->totalReceivedQuantity($items);
 
         if ($existing !== null) {
-            $existing->update([
+            $updates = [
                 'material_name' => $po->po_number,
                 'supplier' => $po->vendor_name,
                 'quantity' => $totalReceived,
@@ -56,7 +59,13 @@ class PurchaseOrderCheckinService
                 'flow_source' => 'purchase_order',
                 'receipt_phase' => $phase,
                 'status' => $phase,
-            ]);
+            ];
+
+            if (! filled($existing->mrn_number)) {
+                $updates['mrn_number'] = $this->mrnNumbers->nextMrnNumber();
+            }
+
+            $existing->update($updates);
 
             return;
         }
@@ -71,6 +80,7 @@ class PurchaseOrderCheckinService
             'unit' => 'mixed',
             'batch_number' => $po->po_number,
             'pr_number' => $po->pr_number,
+            'mrn_number' => $this->mrnNumbers->nextMrnNumber(),
             'items' => $items,
             'notes' => 'Awaiting material arrival from approved PO',
             'status' => 'order_placed',

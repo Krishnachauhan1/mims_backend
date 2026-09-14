@@ -1,0 +1,21 @@
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /
+
+    # Serve files that exist in mims/ (css copied here on deploy)
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # Fallback: Laravel public assets (may be blocked on some hosts)
+    RewriteCond %{REQUEST_URI} ^/(css|build|storage)/
+    RewriteRule ^(.*)$ ../../mims-api/public/$1 [L]
+
+    RewriteRule ^ index.php [L]
+</IfModule>
+
+<IfModule mod_headers.c>
+    <FilesMatch "^(index\.php|index\.html)$">
+        Header set Cache-Control "no-cache, no-store, must-revalidate"
+    </FilesMatch>
+</IfModule>

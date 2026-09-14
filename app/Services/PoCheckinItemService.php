@@ -61,6 +61,7 @@ class PoCheckinItemService
                 is_array($existing)
                     ? (is_array($existing['receipt_history'] ?? null) ? $existing['receipt_history'] : [])
                     : (is_array($raw['receipt_history'] ?? null) ? $raw['receipt_history'] : []),
+                (int) ($existing['qc_passed_quantity'] ?? $raw['qc_passed_quantity'] ?? 0),
             );
         }
 
@@ -84,6 +85,7 @@ class PoCheckinItemService
             $raw['unit'] ?? 'pcs',
             $raw['status'] ?? null,
             is_array($raw['receipt_history'] ?? null) ? $raw['receipt_history'] : [],
+            (int) ($raw['qc_passed_quantity'] ?? 0),
         );
     }
 
@@ -97,16 +99,18 @@ class PoCheckinItemService
         string $unit = 'pcs',
         ?string $status = null,
         array $receiptHistory = [],
+        int $qcPassedQuantity = 0,
     ): array {
         $received = min(max($received, 0), max($ordered, 0));
         $pending = max(0, $ordered - $received);
-        $resolvedStatus = $status ?? $this->deriveItemStatus($ordered, $received, 'pending');
+        $qcPassedQuantity = min(max($qcPassedQuantity, 0), $received);
+        $resolvedStatus = $status ?? $this->deriveItemStatus($ordered, $received, $qcPassedQuantity, 'pending');
 
         if ($resolvedStatus === 'order_received' && $received < $ordered) {
-            $resolvedStatus = $this->deriveItemStatus($ordered, $received, 'pending');
+            $resolvedStatus = $this->deriveItemStatus($ordered, $received, $qcPassedQuantity, 'pending');
         }
 
-        if ($received >= $ordered && $resolvedStatus === 'pending') {
+        if ($received >= $ordered && $qcPassedQuantity >= $received && $resolvedStatus === 'pending') {
             $resolvedStatus = 'checked_in';
         }
 
@@ -115,19 +119,32 @@ class PoCheckinItemService
             'ordered_quantity' => $ordered,
             'received_quantity' => $received,
             'pending_quantity' => $pending,
+            'qc_passed_quantity' => $qcPassedQuantity,
             'unit' => $unit,
             'status' => $resolvedStatus,
             'receipt_history' => array_values($receiptHistory),
         ];
     }
 
-    public function deriveItemStatus(int $ordered, int $received, string $current = 'pending'): string
-    {
-        if ($current === 'order_received' && $received >= $ordered) {
+    public function deriveItemStatus(
+        int $ordered,
+        int $received,
+        int $qcPassedQuantity = 0,
+        string $current = 'pending',
+    ): string {
+        if ($current === 'order_received' && $received >= $ordered && $qcPassedQuantity >= $received) {
             return 'order_received';
         }
 
-        if ($received >= $ordered && $ordered > 0) {
+        if ($received >= $ordered && $ordered > 0 && $qcPassedQuantity >= $received) {
+            return 'checked_in';
+        }
+
+        if ($received > 0 && $qcPassedQuantity < $received) {
+            return 'quality_check';
+        }
+
+        if ($received > 0 && $qcPassedQuantity >= $received) {
             return 'checked_in';
         }
 
@@ -156,7 +173,12 @@ class PoCheckinItemService
             return 'order_received';
         }
 
-        if (count(array_filter($statuses, fn ($s) => in_array($s, ['pending', 'partial'], true))) === 0) {
+        if (count(array_filter($statuses, fn ($s) => in_array($s, ['quality_check'], true))) > 0
+            && count(array_filter($statuses, fn ($s) => in_array($s, ['pending', 'partial'], true))) === 0) {
+            return 'checked_in';
+        }
+
+        if (count(array_filter($statuses, fn ($s) => in_array($s, ['pending', 'partial', 'quality_check'], true))) === 0) {
             return 'checked_in';
         }
 
@@ -167,6 +189,66 @@ class PoCheckinItemService
         }
 
         return 'order_placed';
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $items
+     */
+    public function jobWorkFullyReceived(array $items): bool
+    {
+        if ($items === []) {
+            return false;
+        }
+
+        foreach ($items as $item) {
+            $ordered = (int) ($item['ordered_quantity'] ?? 0);
+            $received = (int) ($item['received_quantity'] ?? 0);
+            if ($received < $ordered) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public function jobWorkQcComplete(array $items): bool
+    {
+        if (! $this->jobWorkFullyReceived($items)) {
+            return false;
+        }
+
+        foreach ($items as $item) {
+            $received = (int) ($item['received_quantity'] ?? 0);
+            $qcPassed = (int) ($item['qc_passed_quantity'] ?? 0);
+            if ($qcPassed < $received) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $items
+     */
+    public function deriveJobWorkPhase(array $items): string
+    {
+        if ($items === []) {
+            return 'job_work_awaiting_return';
+        }
+
+        if ($this->jobWorkQcComplete($items)) {
+            return 'checked_in';
+        }
+
+        foreach ($items as $item) {
+            $status = $item['status'] ?? 'pending';
+            if ($status === 'quality_check' || (int) ($item['received_quantity'] ?? 0) > 0) {
+                return 'partial';
+            }
+        }
+
+        return 'job_work_awaiting_return';
     }
 
     /**
@@ -195,15 +277,35 @@ class PoCheckinItemService
                 ?? 0
             )));
 
-            return $this->buildItem(
-                trim((string) ($item['item_name'] ?? 'Item')),
-                $qty,
-                $qty,
-                (string) ($item['unit'] ?? 'pcs'),
-                'checked_in',
-                is_array($item['dispatch_history'] ?? null) ? $item['dispatch_history'] : [],
-            );
+            $name = trim((string) ($item['item_name'] ?? 'Item'));
+
+            return [
+                'item_name' => $name,
+                'ordered_quantity' => $qty,
+                'available_quantity' => $qty,
+                'quantity' => $qty,
+                'dispatched_quantity' => (int) ($item['dispatched_quantity'] ?? 0),
+                'pending_quantity' => max(0, $qty - (int) ($item['dispatched_quantity'] ?? 0)),
+                'unit' => (string) ($item['unit'] ?? 'pcs'),
+                'inventory_id' => $item['inventory_id'] ?? null,
+                'batch_number' => $item['batch_number'] ?? null,
+                'status' => (string) ($item['status'] ?? 'pending'),
+                'dispatch_history' => is_array($item['dispatch_history'] ?? null)
+                    ? $item['dispatch_history']
+                    : [],
+            ];
         }, array_filter($rawItems, fn ($raw) => is_array($raw))));
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $items
+     */
+    public function totalDispatchedQuantity(array $items): int
+    {
+        return array_sum(array_map(
+            fn (array $item) => (int) ($item['dispatched_quantity'] ?? 0),
+            $items,
+        ));
     }
 
     /**

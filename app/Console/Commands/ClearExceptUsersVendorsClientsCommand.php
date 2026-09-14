@@ -10,12 +10,12 @@ use Illuminate\Support\Facades\Storage;
 
 class ClearExceptUsersVendorsClientsCommand extends Command
 {
-    protected $signature = 'db:clear-except-users-vendors-clients {--force : Skip confirmation prompt}';
+    protected $signature = 'db:clear-except-users-vendors-clients-items {--force : Skip confirmation prompt}';
 
-    protected $description = 'Clear all data except users, vendors, and clients';
+    protected $description = 'Clear all data except users, vendors, clients, and items';
 
     /**
-     * Child tables first, then parents. Keeps only users, vendors, clients.
+     * Child tables first, then parents. Keeps users, vendors, clients, items (+ item documents).
      *
      * @var list<string>
      */
@@ -25,6 +25,9 @@ class ClearExceptUsersVendorsClientsCommand extends Command
         'batch_material_requests',
         'work_order_materials',
         'quality_inspections',
+        'daily_production_entries',
+        'packing_entries',
+        'expenses',
         'sales_orders',
         'inventory_transactions',
         'rejections',
@@ -35,7 +38,6 @@ class ClearExceptUsersVendorsClientsCommand extends Command
         'purchase_orders',
         'purchase_requisitions',
         'inventory_items',
-        'documents',
         'machinery_maintenance_logs',
         'audit_logs',
         'notifications',
@@ -45,7 +47,7 @@ class ClearExceptUsersVendorsClientsCommand extends Command
         'machinery',
         'workflows',
         'processes',
-        'items',
+        'item_machine_times',
         'company_profiles',
         'personal_access_tokens',
         'sessions',
@@ -59,7 +61,7 @@ class ClearExceptUsersVendorsClientsCommand extends Command
     public function handle(): int
     {
         if (! $this->option('force') && ! $this->confirm(
-            'Delete ALL data except users, vendors, and clients?',
+            'Delete ALL data except users, vendors, clients, and items?',
             false,
         )) {
             $this->warn('Cancelled.');
@@ -68,12 +70,16 @@ class ClearExceptUsersVendorsClientsCommand extends Command
         }
 
         if (Schema::hasTable('documents')) {
-            $this->info('Clearing uploaded document files...');
-            Document::query()->each(function (Document $document): void {
-                if ($document->file_path && Storage::disk('local')->exists($document->file_path)) {
-                    Storage::disk('local')->delete($document->file_path);
-                }
-            });
+            $this->info('Clearing non-item uploaded files...');
+            Document::query()
+                ->where('module', '!=', 'item')
+                ->each(function (Document $document): void {
+                    if ($document->file_path && Storage::disk('local')->exists($document->file_path)) {
+                        Storage::disk('local')->delete($document->file_path);
+                    }
+                });
+            Document::query()->where('module', '!=', 'item')->delete();
+            $this->line('  cleared non-item documents');
         }
 
         Schema::disableForeignKeyConstraints();
@@ -109,9 +115,10 @@ class ClearExceptUsersVendorsClientsCommand extends Command
         $users = Schema::hasTable('users') ? DB::table('users')->count() : 0;
         $vendors = Schema::hasTable('vendors') ? DB::table('vendors')->count() : 0;
         $clients = Schema::hasTable('clients') ? DB::table('clients')->count() : 0;
+        $items = Schema::hasTable('items') ? DB::table('items')->count() : 0;
 
         $this->newLine();
-        $this->info("Done. Kept {$users} user(s), {$vendors} vendor(s), {$clients} client(s).");
+        $this->info("Done. Kept {$users} user(s), {$vendors} vendor(s), {$clients} client(s), {$items} item(s).");
 
         return self::SUCCESS;
     }

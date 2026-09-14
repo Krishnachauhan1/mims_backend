@@ -20,16 +20,55 @@ class PurchaseRequisitionController extends Controller
         $query = PurchaseRequisition::query()->latest();
 
         if ($request->boolean('for_po')) {
-            $query->approvedWithoutPo();
-        } elseif ($request->filled('status')) {
+            $items = $query->approvedWithoutPo()->get()->map(
+                fn (PurchaseRequisition $pr) => $this->format($pr),
+            )->values();
+
+            return response()->json($items);
+        }
+
+        if ($request->filled('status') && $request->string('status')->toString() !== 'all') {
             $query->where('status', $request->string('status')->toString());
         }
 
-        $items = $query->get()->map(
-            fn (PurchaseRequisition $pr) => $this->format($pr),
-        );
+        if ($request->filled('search')) {
+            $term = '%'.$request->string('search')->toString().'%';
+            $query->where(function ($builder) use ($term) {
+                $builder
+                    ->where('pr_number', 'like', $term)
+                    ->orWhere('vendor_name', 'like', $term)
+                    ->orWhere('contact_person', 'like', $term)
+                    ->orWhere('contact_mobile', 'like', $term)
+                    ->orWhere('item_name', 'like', $term);
+            });
+        }
 
-        return response()->json($items);
+        if (! $request->has('page') && ! $request->has('per_page')) {
+            return response()->json(
+                $query->get()->map(
+                    fn (PurchaseRequisition $pr) => $this->format($pr),
+                )->values(),
+            );
+        }
+
+        $perPage = min(100, max(5, (int) $request->integer('per_page', 20)));
+        $page = max(1, (int) $request->integer('page', 1));
+        $paginator = $query->paginate($perPage, ['*'], 'page', $page);
+
+        return response()->json([
+            'data' => $paginator->getCollection()
+                ->map(fn (PurchaseRequisition $pr) => $this->format($pr))
+                ->values(),
+            'meta' => [
+                'current_page' => $paginator->currentPage(),
+                'last_page' => $paginator->lastPage(),
+                'per_page' => $paginator->perPage(),
+                'total' => $paginator->total(),
+                'from' => $paginator->firstItem(),
+                'to' => $paginator->lastItem(),
+                'status_counts' => $this->prStatusCounts(),
+            ],
+        ]);
     }
 
     public function store(Request $request): JsonResponse
@@ -229,6 +268,23 @@ class PurchaseRequisitionController extends Controller
 
             return $item;
         }, $items);
+    }
+
+    private function prStatusCounts(): array
+    {
+        $rows = PurchaseRequisition::query()
+            ->selectRaw('status, COUNT(*) as aggregate')
+            ->groupBy('status')
+            ->pluck('aggregate', 'status');
+
+        return [
+            'draft' => (int) ($rows['draft'] ?? 0),
+            'submitted' => (int) ($rows['submitted'] ?? 0),
+            'approved' => (int) ($rows['approved'] ?? 0),
+            'revision' => (int) ($rows['revision'] ?? 0),
+            'rejected' => (int) ($rows['rejected'] ?? 0),
+            'all' => PurchaseRequisition::query()->count(),
+        ];
     }
 
     private function format(PurchaseRequisition $pr): array

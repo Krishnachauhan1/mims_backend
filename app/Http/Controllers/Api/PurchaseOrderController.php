@@ -3,8 +3,11 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\InventoryTransaction;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseRequisition;
+use App\Services\PermissionService;
+use App\Services\PoCheckinItemService;
 use App\Services\PurchaseOrderCheckinService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -12,15 +15,54 @@ use Symfony\Component\HttpFoundation\Response;
 
 class PurchaseOrderController extends Controller
 {
-    public function __construct(private PurchaseOrderCheckinService $purchaseOrderCheckin) {}
+    public function __construct(
+        private PurchaseOrderCheckinService $purchaseOrderCheckin,
+        private PoCheckinItemService $poCheckinItems,
+        private PermissionService $permissions,
+    ) {}
 
-    public function index(): JsonResponse
+    public function index(Request $request): JsonResponse
     {
-        $orders = PurchaseOrder::latest()->get()->map(
-            fn (PurchaseOrder $po) => $this->format($po),
-        );
+        $query = PurchaseOrder::query()->latest();
 
-        return response()->json($orders);
+        if ($request->filled('status') && $request->string('status')->toString() !== 'all') {
+            $query->where('status', $request->string('status')->toString());
+        }
+
+        if ($request->filled('search')) {
+            $term = '%'.$request->string('search')->toString().'%';
+            $query->where(function ($builder) use ($term) {
+                $builder
+                    ->where('po_number', 'like', $term)
+                    ->orWhere('pr_number', 'like', $term)
+                    ->orWhere('vendor_name', 'like', $term);
+            });
+        }
+
+        if (! $request->has('page') && ! $request->has('per_page')) {
+            return response()->json(
+                $query->get()->map(fn (PurchaseOrder $po) => $this->format($po)),
+            );
+        }
+
+        $perPage = min(100, max(5, (int) $request->integer('per_page', 20)));
+        $page = max(1, (int) $request->integer('page', 1));
+        $paginator = $query->paginate($perPage, ['*'], 'page', $page);
+
+        return response()->json([
+            'data' => $paginator->getCollection()
+                ->map(fn (PurchaseOrder $po) => $this->format($po))
+                ->values(),
+            'meta' => [
+                'current_page' => $paginator->currentPage(),
+                'last_page' => $paginator->lastPage(),
+                'per_page' => $paginator->perPage(),
+                'total' => $paginator->total(),
+                'from' => $paginator->firstItem(),
+                'to' => $paginator->lastItem(),
+                'status_counts' => $this->poStatusCounts(),
+            ],
+        ]);
     }
 
     public function approvedPrs(): JsonResponse
@@ -29,7 +71,8 @@ class PurchaseOrderController extends Controller
             ->approvedWithoutPo()
             ->latest()
             ->get()
-            ->map(fn (PurchaseRequisition $pr) => $this->formatRequisition($pr));
+            ->map(fn (PurchaseRequisition $pr) => $this->formatRequisition($pr))
+            ->values();
 
         return response()->json($prs);
     }
@@ -38,18 +81,37 @@ class PurchaseOrderController extends Controller
     {
         $data = $this->validatedPayload($request);
 
-        if (! empty($data['pr_number'])) {
-            if (PurchaseOrder::query()
-                ->where('pr_number', $data['pr_number'])
-                ->exists()) {
+        if (! empty($data['pr_number']) || ! empty($data['pr_id'])) {
+            $activePoExists = PurchaseOrder::query()
+                ->whereNotIn('status', ['rejected'])
+                ->where(function ($q) use ($data) {
+                    if (! empty($data['pr_id'])) {
+                        $q->where('pr_id', $data['pr_id']);
+                    }
+                    if (! empty($data['pr_number'])) {
+                        $q->{! empty($data['pr_id']) ? 'orWhere' : 'where'}(
+                            function ($sub) use ($data) {
+                                $sub->where('pr_number', $data['pr_number'])
+                                    ->whereNull('pr_id');
+                            },
+                        );
+                    }
+                })
+                ->exists();
+
+            if ($activePoExists) {
                 return response()->json([
                     'message' => 'Purchase order already exists for this PR',
                 ], Response::HTTP_UNPROCESSABLE_ENTITY);
             }
 
-            $pr = PurchaseRequisition::query()
-                ->where('pr_number', $data['pr_number'])
-                ->first();
+            $prQuery = PurchaseRequisition::query();
+            if (! empty($data['pr_number'])) {
+                $prQuery->where('pr_number', $data['pr_number']);
+            } elseif (! empty($data['pr_id'])) {
+                $prQuery->where('id', $data['pr_id']);
+            }
+            $pr = $prQuery->first();
 
             if ($pr === null) {
                 return response()->json([
@@ -84,6 +146,100 @@ class PurchaseOrderController extends Controller
         return response()->json($this->format($purchaseOrder->fresh()));
     }
 
+    public function destroy(Request $request, PurchaseOrder $purchaseOrder): JsonResponse
+    {
+        if (! $this->userCanManagePo($request)) {
+            return response()->json([
+                'message' => 'You do not have permission to delete purchase orders',
+            ], Response::HTTP_FORBIDDEN);
+        }
+
+        $checkins = InventoryTransaction::query()
+            ->where('type', 'checkin')
+            ->where('po_number', $purchaseOrder->po_number)
+            ->where(function ($query): void {
+                $query->whereNull('flow_source')
+                    ->orWhere('flow_source', 'purchase_order');
+            })
+            ->get();
+
+        foreach ($checkins as $checkin) {
+            $items = is_array($checkin->items) ? $checkin->items : [];
+            $received = $this->poCheckinItems->totalReceivedQuantity($items);
+            $phase = (string) ($checkin->receipt_phase ?? $checkin->status ?? 'order_placed');
+
+            if ($received > 0 || in_array($phase, ['partial', 'checked_in', 'order_received'], true)) {
+                return response()->json([
+                    'message' => 'Cannot delete PO — materials have already been received in Check-In',
+                ], Response::HTTP_UNPROCESSABLE_ENTITY);
+            }
+
+            $checkin->delete();
+        }
+
+        $this->deleteLinkedRequisition($purchaseOrder);
+
+        $purchaseOrder->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Purchase order deleted',
+        ]);
+    }
+
+    private function deleteLinkedRequisition(PurchaseOrder $purchaseOrder): void
+    {
+        $pr = null;
+
+        if ($purchaseOrder->pr_id) {
+            $pr = PurchaseRequisition::query()->find($purchaseOrder->pr_id);
+        } elseif ($purchaseOrder->pr_number) {
+            $pr = PurchaseRequisition::query()
+                ->where('pr_number', $purchaseOrder->pr_number)
+                ->first();
+        }
+
+        if ($pr === null) {
+            return;
+        }
+
+        $otherActivePo = PurchaseOrder::query()
+            ->where('id', '!=', $purchaseOrder->id)
+            ->whereNotIn('status', ['rejected'])
+            ->where(function ($query) use ($pr) {
+                $query->where('pr_id', $pr->id)
+                    ->orWhere(function ($sub) use ($pr) {
+                        $sub->where('pr_number', $pr->pr_number)
+                            ->whereNull('pr_id');
+                    });
+            })
+            ->exists();
+
+        if ($otherActivePo) {
+            return;
+        }
+
+        $pr->delete();
+    }
+
+    private function userCanManagePo(Request $request): bool
+    {
+        $user = $request->user();
+        if ($user === null) {
+            return false;
+        }
+
+        if (strcasecmp((string) $user->role, 'admin') === 0) {
+            return true;
+        }
+
+        $permissions = $this->permissions->permissionsForRole($user->role);
+
+        return in_array('*', $permissions, true)
+            || in_array('purchase_order.approve', $permissions, true)
+            || in_array('purchase_order.manage', $permissions, true);
+    }
+
     private function validatedPayload(Request $request): array
     {
         return $request->validate([
@@ -105,6 +261,21 @@ class PurchaseOrderController extends Controller
             'total_amount' => 'nullable|numeric|min:0',
             'created_at' => 'nullable|date',
         ]);
+    }
+
+    private function poStatusCounts(): array
+    {
+        $rows = PurchaseOrder::query()
+            ->selectRaw('status, COUNT(*) as aggregate')
+            ->groupBy('status')
+            ->pluck('aggregate', 'status');
+
+        return [
+            'pending' => (int) ($rows['pending'] ?? 0),
+            'approved' => (int) ($rows['approved'] ?? 0),
+            'rejected' => (int) ($rows['rejected'] ?? 0),
+            'all' => PurchaseOrder::query()->count(),
+        ];
     }
 
     private function format(PurchaseOrder $po): array

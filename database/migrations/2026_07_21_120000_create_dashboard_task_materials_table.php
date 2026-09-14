@@ -8,6 +8,10 @@ return new class extends Migration
 {
     public function up(): void
     {
+        if (Schema::hasTable('dashboard_task_materials')) {
+            return;
+        }
+
         Schema::create('dashboard_task_materials', function (Blueprint $table) {
             $table->id();
             $table->foreignId('dashboard_task_id')->constrained('dashboard_tasks')->cascadeOnDelete();

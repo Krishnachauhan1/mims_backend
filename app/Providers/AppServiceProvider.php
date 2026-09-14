@@ -26,6 +26,11 @@ use App\Models\WorkOrder;
 use App\Observers\AuditableObserver;
 use Illuminate\Support\ServiceProvider;
 
+use App\Services\PermissionService;
+use App\Support\WebNavigation;
+use Illuminate\Pagination\Paginator;
+use Illuminate\Support\Facades\View;
+
 class AppServiceProvider extends ServiceProvider
 {
     public function register(): void
@@ -35,6 +40,8 @@ class AppServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
+        Paginator::useBootstrapFive();
+
         $observer = AuditableObserver::class;
 
         Client::observe($observer);
@@ -58,5 +65,12 @@ class AppServiceProvider extends ServiceProvider
         ProductionBatch::observe($observer);
         DashboardTask::observe($observer);
         User::observe($observer);
+
+        View::composer('layouts.app', function ($view) {
+            $user = auth()->user();
+            $permissions = app(PermissionService::class);
+            $view->with('navSections', $user ? WebNavigation::sections($user) : []);
+            $view->with('userRoleLabel', $user ? $permissions->roleLabel($user->role) : '');
+        });
     }
 }

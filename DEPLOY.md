@@ -226,6 +226,30 @@ curl -X POST https://mis.nextlogicsolution.id/api/auth/login \
 | 404 on `/api/*` | Document root must be `public/`; enable `mod_rewrite` |
 | Mixed content / HTTP redirects | `APP_URL` must use `https://`; trust proxies is enabled in `bootstrap/app.php` |
 | CORS errors (Flutter web) | Set `CORS_ALLOWED_ORIGINS=*` or your frontend origin in `.env` |
+| `Failed to fetch` / status 0 (Flutter) | Often broken **IPv6** on Hostinger — see below |
+
+### IPv6 / “Failed to fetch” (status 0)
+
+If the app shows `Network error — ClientException: Failed to fetch` with **status 0**, but login worked before, the API may be unreachable over IPv6 while IPv4 works.
+
+**Verify on your PC (or server SSH):**
+
+```bash
+# Should return {"status":"ok",...}
+curl -4 https://mis.nextlogicsolution.id/api/health
+
+# If this fails with "Connection reset by peer", IPv6 is broken:
+curl -6 https://mis.nextlogicsolution.id/api/health
+```
+
+**Fix (Hostinger hPanel):**
+
+1. **Domains** → `mis.nextlogicsolution.id` → **DNS / DNS Zone**
+2. If an **AAAA** record exists for `@` or `mis`, **delete it** (forces clients to use IPv4 only)
+3. Keep the **A** record pointing to the server IP
+4. Wait 5–15 minutes for DNS propagation, then test again in the browser
+
+If the issue persists, open Hostinger support ticket: “IPv6 TLS handshake resets on subdomain mis.nextlogicsolution.id”.
 
 ## Demo login (after seed)
 

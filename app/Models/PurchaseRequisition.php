@@ -41,8 +41,23 @@ class PurchaseRequisition extends Model
             ->whereNotExists(function ($sub) {
                 $sub->selectRaw('1')
                     ->from('purchase_orders')
-                    ->whereColumn('purchase_orders.pr_number', 'purchase_requisitions.pr_number')
-                    ->whereNotNull('purchase_orders.pr_number');
+                    ->whereNotIn('purchase_orders.status', ['rejected'])
+                    ->where(function ($match) {
+                        // Linked to this exact PR record.
+                        $match->whereColumn(
+                            'purchase_orders.pr_id',
+                            'purchase_requisitions.id',
+                        )
+                        // Legacy PO rows without pr_id — match by number only.
+                        ->orWhere(function ($legacy) {
+                            $legacy
+                                ->whereColumn(
+                                    'purchase_orders.pr_number',
+                                    'purchase_requisitions.pr_number',
+                                )
+                                ->whereNull('purchase_orders.pr_id');
+                        });
+                    });
             });
     }
 }

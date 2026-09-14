@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\DailyProductionEntry;
 use App\Models\Client;
 use App\Models\DashboardTask;
 use App\Services\AppNotificationService;
@@ -10,13 +11,18 @@ use App\Models\FinishedGood;
 use App\Models\Gauge;
 use App\Models\InventoryItem;
 use App\Models\InventoryTransaction;
+use App\Models\Item;
 use App\Models\JobWork;
+use App\Models\PackingEntry;
 use App\Models\ProductionBatch;
 use App\Models\PurchaseOrder;
+use App\Models\QualityInspection;
 use App\Models\Rejection;
 use App\Models\SalesOrder;
 use App\Models\User;
 use App\Models\WorkOrder;
+use App\Services\CatalogInventorySyncService;
+use App\Services\InventoryCostService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -44,6 +50,7 @@ class DashboardController extends Controller
             ->count();
 
         $gaugeStats = $this->gaugeKpiStats($gauges);
+        $lowStockCount = $this->countLowStockMaterials();
 
         return response()->json([
             'total_inventory' => (int) $inventory->sum('quantity'),
@@ -51,6 +58,7 @@ class DashboardController extends Controller
             'wip' => (int) $inventory->where('type', 'wip')->sum('quantity') + $wipBatches,
             'finished_goods' => (int) $finishedGoods->sum('stock') + (int) $inventory->where('type', 'finished_goods')->sum('quantity'),
             'rejected' => (int) $rejections->sum('quantity'),
+            'low_stock_count' => $lowStockCount,
             'daily_production' => (int) $batches
                 ->filter(fn (ProductionBatch $batch) => $batch->status === 'completed'
                     && $batch->completed_at?->isSameDay($today))
@@ -61,6 +69,18 @@ class DashboardController extends Controller
                 ->sum('quantity'),
             'inventory_movement' => $checkins->count(),
             ...$gaugeStats,
+        ]);
+    }
+
+    public function lowStockAlerts(): JsonResponse
+    {
+        $items = collect($this->buildLowStockAlerts());
+
+        return response()->json([
+            'data' => $items,
+            'meta' => [
+                'count' => $items->count(),
+            ],
         ]);
     }
 
@@ -89,6 +109,62 @@ class DashboardController extends Controller
         }
 
         return response()->json(array_values($buckets));
+    }
+
+    public function dailyProductionTrends(): JsonResponse
+    {
+        try {
+            $buckets = $this->emptyDailyBuckets();
+            $start = Carbon::now()->subDays(6)->startOfDay();
+
+            if (Schema::hasTable('daily_production_entries')) {
+                $entries = DailyProductionEntry::query()
+                    ->whereDate('production_date', '>=', $start->toDateString())
+                    ->get();
+
+                foreach ($entries as $entry) {
+                    $key = $entry->production_date?->format('Y-m-d');
+                    if ($key && isset($buckets[$key])) {
+                        $buckets[$key]['produced'] += (int) ($entry->actual_quantity ?? 0);
+                        $buckets[$key]['rejected'] += (int) ($entry->reject_quantity ?? 0);
+                    }
+                }
+            }
+
+            $batches = ProductionBatch::query()
+                ->where('status', 'completed')
+                ->whereNotNull('completed_at')
+                ->where('completed_at', '>=', $start)
+                ->get();
+
+            foreach ($batches as $batch) {
+                $key = $batch->completed_at?->format('Y-m-d');
+                if ($key && isset($buckets[$key])) {
+                    $buckets[$key]['produced'] += (int) $batch->quantity;
+                }
+            }
+
+            $rejections = Rejection::query()
+                ->where(function ($query) use ($start): void {
+                    $query->whereDate('rejection_date', '>=', $start->toDateString())
+                        ->orWhere('created_at', '>=', $start);
+                })
+                ->get();
+
+            foreach ($rejections as $rejection) {
+                $date = $rejection->rejection_date ?? $rejection->created_at;
+                $key = $date?->format('Y-m-d');
+                if ($key && isset($buckets[$key])) {
+                    $buckets[$key]['rejected'] += (int) $rejection->quantity;
+                }
+            }
+
+            return response()->json(array_values($buckets));
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json(array_values($this->emptyDailyBuckets()));
+        }
     }
 
     public function profitLossTrends(): JsonResponse
@@ -287,22 +363,38 @@ class DashboardController extends Controller
 
     public function recentActivities(): JsonResponse
     {
+        try {
+            return response()->json($this->buildRecentActivities());
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json([]);
+        }
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function buildRecentActivities(): array
+    {
         $activities = collect();
 
-        $checkins = InventoryTransaction::query()
-            ->latest()
-            ->limit(5)
-            ->get();
+        if (Schema::hasTable('inventory_transactions')) {
+            $checkins = InventoryTransaction::query()
+                ->latest()
+                ->limit(5)
+                ->get();
 
-        foreach ($checkins as $transaction) {
-            $type = $transaction->type === 'checkout' ? 'checkout' : 'checkin';
-            $activities->push([
-                'type' => $type,
-                'title' => $type === 'checkout' ? 'Material checked out' : 'Material checked in',
-                'desc' => $transaction->material_name.' · '.$transaction->quantity.' '.$transaction->unit,
-                'user' => $transaction->supplier ?? 'System',
-                'time' => $transaction->created_at?->format('Y-m-d H:i') ?? '—',
-            ]);
+            foreach ($checkins as $transaction) {
+                $type = $transaction->type === 'checkout' ? 'checkout' : 'checkin';
+                $activities->push([
+                    'type' => $type,
+                    'title' => $type === 'checkout' ? 'Material checked out' : 'Material checked in',
+                    'desc' => $transaction->material_name.' · '.$transaction->quantity.' '.$transaction->unit,
+                    'user' => $transaction->supplier ?? 'System',
+                    'time' => $transaction->created_at?->format('Y-m-d H:i') ?? '—',
+                ]);
+            }
         }
 
         $batches = ProductionBatch::query()
@@ -314,7 +406,7 @@ class DashboardController extends Controller
             $activities->push([
                 'type' => 'workflow',
                 'title' => 'Production batch '.$batch->status,
-                'desc' => $batch->product_name.' · '.$batch->batch_number,
+                'desc' => ($batch->product_name ?? $batch->product ?? 'Batch').' · '.$batch->batch_number,
                 'user' => $batch->assigned_to ?? $batch->user_name ?? 'System',
                 'time' => ($batch->updated_at ?? $batch->created_at)?->format('Y-m-d H:i') ?? '—',
             ]);
@@ -329,29 +421,41 @@ class DashboardController extends Controller
             $activities->push([
                 'type' => 'reject',
                 'title' => 'Rejection recorded',
-                'desc' => $rejection->product_name.' · '.$rejection->quantity.' units at '.$rejection->stage,
+                'desc' => ($rejection->product_name ?? $rejection->product ?? 'Item').' · '.$rejection->quantity.' units at '.$rejection->stage,
                 'user' => $rejection->reported_by ?? 'System',
                 'time' => ($rejection->rejection_date ?? $rejection->created_at)?->format('Y-m-d H:i') ?? '—',
             ]);
         }
 
-        return response()->json(
-            $activities
-                ->sortByDesc('time')
-                ->take(10)
-                ->values()
-                ->all(),
-        );
+        return $activities
+            ->sortByDesc('time')
+            ->take(10)
+            ->values()
+            ->all();
     }
 
     public function stageFlow(): JsonResponse
+    {
+        try {
+            return response()->json($this->buildStageFlow());
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json([]);
+        }
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function buildStageFlow(): array
     {
         $active = ProductionBatch::query()
             ->where('status', '!=', 'completed')
             ->get();
 
         if ($active->isEmpty()) {
-            return response()->json([]);
+            return [];
         }
 
         $counts = [];
@@ -375,7 +479,7 @@ class DashboardController extends Controller
             $i++;
         }
 
-        return response()->json($flow);
+        return $flow;
     }
 
     public function inventoryTrends(): JsonResponse
@@ -409,6 +513,35 @@ class DashboardController extends Controller
     }
 
     public function clientOrders(): JsonResponse
+    {
+        try {
+            return response()->json($this->buildClientOrdersPayload());
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json([
+                'summary' => [
+                    'total_orders' => 0,
+                    'open' => 0,
+                    'in_progress' => 0,
+                    'completed' => 0,
+                    'cancelled' => 0,
+                    'pipeline_value' => 0,
+                    'total_clients' => 0,
+                    'clients_ordering' => 0,
+                    'clients_not_ordering' => 0,
+                ],
+                'by_status' => [],
+                'frequency' => [],
+                'recent' => [],
+            ]);
+        }
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function buildClientOrdersPayload(): array
     {
         $salesOrders = Schema::hasTable('sales_orders')
             ? SalesOrder::query()->latest()->get()
@@ -565,12 +698,12 @@ class DashboardController extends Controller
             return $row;
         }, array_slice($recent, 0, 10));
 
-        return response()->json([
+        return [
             'summary' => $summary,
             'by_status' => $byStatus,
             'client_frequency' => $clientFrequency,
             'recent' => $recent,
-        ]);
+        ];
     }
 
     /**
@@ -832,19 +965,101 @@ class DashboardController extends Controller
 
     public function assignees(): JsonResponse
     {
-        $assignees = User::query()
-            ->where('is_active', true)
-            ->orderBy('name')
-            ->get()
-            ->map(fn (User $user) => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-                'role' => $user->role,
-                'department' => $user->department ?? '—',
-            ]);
+        return response()->json($this->assigneeRows());
+    }
 
-        return response()->json($assignees);
+    /**
+     * Single payload for dashboard initial load (dashboard + reports in one request).
+     */
+    public function bootstrap(Request $request): JsonResponse
+    {
+        return response()->json([
+            'assignees' => $this->bootstrapSection(fn () => $this->assigneeRows()),
+            'kpis' => $this->bootstrapSection(fn () => $this->jsonContent($this->kpis())),
+            'production_trends' => $this->bootstrapSection(fn () => $this->jsonContent(
+                $this->productionTrends()
+            )),
+            'daily_production_trends' => $this->bootstrapSection(fn () => $this->jsonContent(
+                $this->dailyProductionTrends()
+            )),
+            'profit_loss' => $this->bootstrapSection(fn () => $this->buildProfitLossPayload()),
+            'recent_activities' => $this->bootstrapSection(fn () => $this->jsonContent(
+                $this->recentActivities()
+            )),
+            'stage_flow' => $this->bootstrapSection(fn () => $this->jsonContent(
+                $this->stageFlow()
+            )),
+            'client_orders' => $this->bootstrapSection(fn () => $this->jsonContent(
+                $this->clientOrders()
+            )),
+            'tasks' => $this->bootstrapSection(fn () => $this->jsonContent(
+                $this->tasks($request)
+            )),
+            'inventory_trends' => $this->bootstrapSection(fn () => $this->jsonContent(
+                $this->inventoryTrends()
+            )),
+            'inventory' => $this->bootstrapSection(fn () => $this->jsonContent(
+                app(InventoryController::class)->index($request)
+            )),
+            'low_stock_alerts' => $this->bootstrapSection(fn () => $this->jsonContent(
+                $this->lowStockAlerts()
+            )),
+            'production_batches' => $this->bootstrapSection(fn () => $this->bootstrapProductionBatchSummaries()),
+            'reports' => $this->bootstrapSection(fn () => $this->buildReportsBootstrapPayload($request)),
+        ]);
+    }
+
+    /**
+     * Lightweight batch rows for dashboard KPI/trend fallbacks (not full workflow payload).
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function bootstrapProductionBatchSummaries(): array
+    {
+        return ProductionBatch::query()
+            ->orderByDesc('id')
+            ->get([
+                'id',
+                'quantity',
+                'status',
+                'started_at',
+                'created_at',
+                'stage_started_at',
+                'completed_at',
+                'updated_at',
+            ])
+            ->map(fn (ProductionBatch $batch) => [
+                'id' => $batch->id,
+                'quantity' => (int) $batch->quantity,
+                'status' => $batch->status,
+                'started_at' => $batch->started_at?->format('Y-m-d H:i'),
+                'created_at' => $batch->created_at?->format('Y-m-d H:i'),
+                'stage_started_at' => $batch->stage_started_at?->format('Y-m-d H:i'),
+                'completed_at' => $batch->completed_at?->format('Y-m-d H:i'),
+                'updated_at' => $batch->updated_at?->format('Y-m-d H:i'),
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function buildReportsBootstrapPayload(Request $request): array
+    {
+        $reports = app(ReportController::class);
+
+        return [
+            'finished_goods' => $this->jsonContent($reports->finishedGoods()),
+            'rejections' => $this->jsonContent($reports->rejections()),
+            'inventory' => $this->jsonContent($reports->inventory()),
+            'production' => $this->jsonContent($reports->production()),
+            'vendor' => $this->jsonContent($reports->vendor()),
+            'customer' => $this->jsonContent($reports->customer()),
+            'sales_tracking' => $this->jsonContent(app(FinishedGoodController::class)->index()),
+            'most_selling' => $this->jsonContent($reports->mostSellingProducts($request)),
+            'machine_active_work' => $this->jsonContent($reports->machineActiveWork($request)),
+        ];
     }
 
     public function storeTask(Request $request): JsonResponse
@@ -1064,6 +1279,28 @@ class DashboardController extends Controller
         return $buckets;
     }
 
+    /**
+     * @return array<string, array{label: string, date: string, produced: int, rejected: int}>
+     */
+    private function emptyDailyBuckets(int $days = 7): array
+    {
+        $buckets = [];
+        $today = Carbon::now()->startOfDay();
+
+        for ($i = $days - 1; $i >= 0; $i--) {
+            $date = $today->copy()->subDays($i);
+            $key = $date->format('Y-m-d');
+            $buckets[$key] = [
+                'label' => $date->format('D'),
+                'date' => $date->toDateString(),
+                'produced' => 0,
+                'rejected' => 0,
+            ];
+        }
+
+        return $buckets;
+    }
+
     private function emptyFinancialBuckets(int $months = 6): array
     {
         $buckets = [];
@@ -1092,5 +1329,546 @@ class DashboardController extends Controller
             str_contains($normalized, 'finished') => 'Finished Goods',
             default => strtoupper(str_replace('_', ' ', $normalized)),
         };
+    }
+
+    private function countLowStockMaterials(): int
+    {
+        return count($this->buildLowStockAlerts());
+    }
+
+    /**
+     * Raw material / finished goods can have multiple batch rows. Alert only when
+     * total stock for the material is at or below min stock — not per empty batch.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function buildLowStockAlerts(): array
+    {
+        $items = InventoryItem::query()->orderBy('name')->get();
+        $alerts = [];
+        $grouped = [];
+
+        foreach ($items as $item) {
+            if ($this->isAggregatedInventoryType($item->type)) {
+                $key = strtolower(trim((string) $item->type)).'::'.strtolower(trim((string) $item->name));
+                $grouped[$key]['lines'][] = $item;
+                $grouped[$key]['total_qty'] = ($grouped[$key]['total_qty'] ?? 0) + (int) $item->quantity;
+                $grouped[$key]['max_min_stock'] = max(
+                    $grouped[$key]['max_min_stock'] ?? 0,
+                    (int) $item->min_stock,
+                );
+
+                continue;
+            }
+
+            if ((int) $item->min_stock > 0 && (int) $item->quantity <= (int) $item->min_stock) {
+                $alerts[] = $this->formatLowStockAlert($item);
+            }
+        }
+
+        foreach ($grouped as $group) {
+            $min = (int) ($group['max_min_stock'] ?? 0);
+            $qty = (int) ($group['total_qty'] ?? 0);
+            if ($min <= 0 || $qty > $min) {
+                continue;
+            }
+
+            /** @var InventoryItem $representative */
+            $representative = collect($group['lines'])
+                ->sortByDesc(fn (InventoryItem $line) => (int) $line->quantity)
+                ->first();
+
+            $alerts[] = $this->formatLowStockAlert(
+                $representative,
+                $qty,
+                $min,
+                count($group['lines']),
+            );
+        }
+
+        usort(
+            $alerts,
+            fn (array $left, array $right) => strcasecmp((string) $left['name'], (string) $right['name']),
+        );
+
+        $alertKeys = [];
+        foreach ($alerts as $alert) {
+            $alertKeys[$this->lowStockAlertKey($alert)] = true;
+        }
+
+        try {
+            if (! class_exists(CatalogInventorySyncService::class)) {
+                return $alerts;
+            }
+
+            $virtual = app(CatalogInventorySyncService::class)
+                ->virtualRowsForMissing($items, null);
+
+            foreach ($virtual as $row) {
+                $min = (int) ($row['min_stock'] ?? 0);
+                $qty = (int) ($row['quantity'] ?? 0);
+                if ($min <= 0 || $qty > $min) {
+                    continue;
+                }
+
+                $formatted = $this->formatVirtualLowStockAlert($row);
+                $key = $this->lowStockAlertKey($formatted);
+                if (isset($alertKeys[$key])) {
+                    continue;
+                }
+
+                $alertKeys[$key] = true;
+                $alerts[] = $formatted;
+            }
+
+            usort(
+                $alerts,
+                fn (array $left, array $right) => strcasecmp(
+                    (string) ($left['item_code'] ?? $left['name']),
+                    (string) ($right['item_code'] ?? $right['name']),
+                ),
+            );
+        } catch (\Throwable $e) {
+            report($e);
+        }
+
+        return $alerts;
+    }
+
+    /**
+     * @param  array<string, mixed>  $alert
+     */
+    private function lowStockAlertKey(array $alert): string
+    {
+        $type = strtolower(str_replace(' ', '_', (string) ($alert['type'] ?? 'other')));
+        $code = strtolower(trim((string) ($alert['item_code'] ?? $alert['sku'] ?? '')));
+        if ($code !== '') {
+            return "$type::$code";
+        }
+
+        return "$type::".strtolower(trim((string) ($alert['name'] ?? '')));
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     * @return array<string, mixed>
+     */
+    private function formatVirtualLowStockAlert(array $row): array
+    {
+        $qty = (int) ($row['quantity'] ?? 0);
+        $min = (int) ($row['min_stock'] ?? 0);
+
+        return [
+            'id' => $row['id'],
+            'name' => $row['name'],
+            'item_code' => $row['item_code'] ?? $row['sku'] ?? null,
+            'description' => $row['description'] ?? null,
+            'type' => $row['type'],
+            'sku' => $row['sku'] ?? null,
+            'quantity' => $qty,
+            'min_stock' => $min,
+            'unit' => $row['unit'] ?? 'pcs',
+            'batch_number' => null,
+            'batch_count' => 1,
+            'location' => $row['location'] ?? null,
+            'shortfall' => max(0, $min - $qty),
+            'is_aggregated' => false,
+            'is_catalog_only' => true,
+        ];
+    }
+
+    private function isAggregatedInventoryType(?string $type): bool
+    {
+        $normalized = strtolower(str_replace(' ', '_', (string) $type));
+
+        return in_array($normalized, ['raw_material', 'finished_goods'], true);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function formatLowStockAlert(
+        InventoryItem $item,
+        ?int $quantity = null,
+        ?int $minStock = null,
+        ?int $batchCount = null,
+    ): array {
+        $qty = $quantity ?? (int) $item->quantity;
+        $min = $minStock ?? (int) $item->min_stock;
+        $batches = $batchCount ?? 1;
+        $catalog = app(InventoryCostService::class)->catalogDisplayFor($item);
+
+        return [
+            'id' => $item->id,
+            'name' => $item->name,
+            'item_code' => $catalog['item_code'] ?? (filled($item->sku) ? $item->sku : null),
+            'description' => $catalog['description'] ?? null,
+            'type' => $item->type,
+            'sku' => $item->sku,
+            'quantity' => $qty,
+            'min_stock' => $min,
+            'unit' => $item->unit ?? 'pcs',
+            'batch_number' => $batches > 1 ? null : $item->batch_number,
+            'batch_count' => $batches,
+            'location' => $item->location,
+            'shortfall' => max(0, $min - $qty),
+            'is_aggregated' => $batches > 1,
+            'is_catalog_only' => false,
+        ];
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function assigneeRows(): array
+    {
+        return User::query()
+            ->where('is_active', true)
+            ->orderBy('name')
+            ->get()
+            ->map(fn (User $user) => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'role' => $user->role,
+                'department' => $user->department ?? '—',
+            ])
+            ->values()
+            ->all();
+    }
+
+    private function bootstrapSection(callable $builder): mixed
+    {
+        try {
+            return $builder();
+        } catch (\Throwable $e) {
+            report($e);
+
+            return null;
+        }
+    }
+
+    private function jsonContent(JsonResponse $response): mixed
+    {
+        return json_decode($response->getContent(), true);
+    }
+
+    public function itemSearch(Request $request): JsonResponse
+    {
+        $query = trim((string) $request->query('q', ''));
+        if (mb_strlen($query) < 2) {
+            return response()->json([
+                'query' => $query,
+                'item' => null,
+                'modules' => new \stdClass,
+                'total_records' => 0,
+                'total_pieces' => 0,
+                'unit' => 'pcs',
+            ]);
+        }
+
+        $item = $this->resolveCatalogItemForSearch($query);
+        $like = '%'.strtolower($query).'%';
+        $workOrderIds = $this->workOrderIdsMatchingItem($item, $query, $like);
+
+        $inventoryRows = InventoryItem::query()
+            ->where(function ($builder) use ($item, $like) {
+                $builder->whereRaw('LOWER(name) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(sku) LIKE ?', [$like]);
+                if ($item !== null) {
+                    $code = strtolower(trim($item->code));
+                    $name = strtolower(trim($item->name));
+                    $builder->orWhereRaw('LOWER(name) LIKE ?', ['%'.$code.'%'])
+                        ->orWhereRaw('LOWER(sku) LIKE ?', ['%'.$code.'%'])
+                        ->orWhereRaw('LOWER(name) LIKE ?', ['%'.$name.'%']);
+                }
+            })
+            ->get();
+
+        $inventoryQty = (int) $inventoryRows->sum('quantity');
+
+        $workflowCount = $workOrderIds->count();
+        $workflowQty = $workOrderIds->isEmpty()
+            ? 0
+            : (int) WorkOrder::query()->whereIn('id', $workOrderIds)->sum('quantity');
+        $workflowByStatus = $workOrderIds->isEmpty()
+            ? []
+            : WorkOrder::query()
+                ->whereIn('id', $workOrderIds)
+                ->selectRaw('supervisor_status, COUNT(*) as total')
+                ->groupBy('supervisor_status')
+                ->pluck('total', 'supervisor_status')
+                ->map(fn ($value) => (int) $value)
+                ->all();
+
+        $productionQuery = ProductionBatch::query()->where(function ($builder) use ($item, $like, $workOrderIds) {
+            $builder->whereRaw('LOWER(product_name) LIKE ?', [$like]);
+            if ($workOrderIds->isNotEmpty()) {
+                $builder->orWhereIn('work_order_id', $workOrderIds);
+            }
+            if ($item !== null) {
+                $code = strtolower(trim($item->code));
+                $name = strtolower(trim($item->name));
+                $builder->orWhereRaw('LOWER(product_name) = ?', [$code])
+                    ->orWhereRaw('LOWER(product_name) = ?', [$name]);
+            }
+        });
+        $productionCount = $productionQuery->count();
+        $productionQty = (int) $productionQuery->clone()->sum('quantity');
+
+        $qualityQuery = QualityInspection::query()
+            ->where('status', 'pending')
+            ->where(function ($builder) use ($item, $like, $workOrderIds) {
+                $builder->whereRaw('LOWER(product_name) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(item_name) LIKE ?', [$like]);
+                if ($workOrderIds->isNotEmpty()) {
+                    $builder->orWhereIn('work_order_id', $workOrderIds);
+                }
+                if ($item !== null) {
+                    $code = strtolower(trim($item->code));
+                    $name = strtolower(trim($item->name));
+                    $builder->orWhereRaw('LOWER(product_name) = ?', [$code])
+                        ->orWhereRaw('LOWER(item_name) = ?', [$code])
+                        ->orWhereRaw('LOWER(product_name) = ?', [$name])
+                        ->orWhereRaw('LOWER(item_name) = ?', [$name]);
+                }
+            });
+        $qualityCount = $qualityQuery->count();
+        $qualityQty = (int) $qualityQuery->clone()
+            ->selectRaw('COALESCE(SUM(GREATEST(0, quantity - COALESCE(passed_qty, 0) - COALESCE(rejected_qty, 0))), 0) as total')
+            ->value('total');
+
+        $packingQuery = PackingEntry::query()->where(function ($builder) use ($item, $like, $workOrderIds) {
+            $builder->whereRaw('LOWER(item_code) LIKE ?', [$like])
+                ->orWhereRaw('LOWER(item_name) LIKE ?', [$like])
+                ->orWhereRaw('LOWER(product_name) LIKE ?', [$like]);
+            if ($workOrderIds->isNotEmpty()) {
+                $builder->orWhereIn('work_order_id', $workOrderIds);
+            }
+        });
+        $packingCount = $packingQuery->count();
+        $packingQty = (int) $packingQuery->clone()->sum('quantity');
+
+        $rejectionQuery = Rejection::query()->where(function ($builder) use ($item, $like) {
+            $builder->whereRaw('LOWER(item_code) LIKE ?', [$like])
+                ->orWhereRaw('LOWER(product_name) LIKE ?', [$like]);
+            if ($item !== null) {
+                $code = strtolower(trim($item->code));
+                $name = strtolower(trim($item->name));
+                $builder->orWhereRaw('LOWER(item_code) = ?', [$code])
+                    ->orWhereRaw('LOWER(product_name) = ?', [$code])
+                    ->orWhereRaw('LOWER(product_name) = ?', [$name]);
+            }
+        });
+        $rejectionCount = $rejectionQuery->count();
+        $rejectionQty = (int) $rejectionQuery->clone()->sum('quantity');
+
+        $finishedQuery = FinishedGood::query()->where(function ($builder) use ($item, $like) {
+            $builder->whereRaw('LOWER(product_name) LIKE ?', [$like])
+                ->orWhereRaw('LOWER(sku) LIKE ?', [$like]);
+            if ($item !== null) {
+                $code = strtolower(trim($item->code));
+                $name = strtolower(trim($item->name));
+                $builder->orWhereRaw('LOWER(product_name) = ?', [$code])
+                    ->orWhereRaw('LOWER(sku) = ?', [$code])
+                    ->orWhereRaw('LOWER(product_name) = ?', [$name]);
+            }
+        });
+        $finishedCount = $finishedQuery->count();
+        $finishedStock = (int) $finishedQuery->clone()->sum('stock');
+
+        $dailyProductionQuery = DailyProductionEntry::query()
+            ->where(function ($builder) use ($item, $like) {
+                $builder->whereRaw('LOWER(item_name) LIKE ?', [$like]);
+                if ($item !== null) {
+                    $builder->orWhere('item_id', $item->id);
+                }
+            });
+        $dailyProductionCount = $dailyProductionQuery->count();
+        $dailyProductionQty = (int) $dailyProductionQuery->clone()->sum('actual_quantity');
+
+        $salesQuery = SalesOrder::query()
+            ->where(function ($builder) use ($item, $like) {
+                $builder->whereRaw('LOWER(product_name) LIKE ?', [$like]);
+                if ($item !== null) {
+                    $builder->orWhere('item_id', $item->id)
+                        ->orWhere('items', 'like', '%"item_id":'.$item->id.'%')
+                        ->orWhere('items', 'like', '%"item_id": "'.$item->id.'"%');
+                }
+            });
+        $salesCount = $salesQuery->count();
+        $salesQty = $this->sumSalesOrderPieces($salesQuery->get(), $item, $like);
+
+        $unit = $item?->unit ?: 'pcs';
+
+        // Route card (work orders) and production batches are the same pipeline — show once.
+        $productionPieces = max($workflowQty, $productionQty);
+        $productionRecords = $workflowCount + $productionCount;
+
+        $modules = [
+            'inventory' => [
+                'label' => 'Inventory',
+                'count' => $inventoryRows->count(),
+                'quantity' => $inventoryQty,
+                'unit' => $unit,
+            ],
+            'production' => [
+                'label' => 'Production',
+                'count' => $productionRecords,
+                'quantity' => $productionPieces,
+                'unit' => $unit,
+                'by_status' => $workflowByStatus,
+            ],
+            'quality' => [
+                'label' => 'Quality',
+                'count' => $qualityCount,
+                'quantity' => $qualityQty,
+                'unit' => $unit,
+            ],
+            'packing' => [
+                'label' => 'Packing',
+                'count' => $packingCount,
+                'quantity' => $packingQty,
+                'unit' => $unit,
+            ],
+            'rejection' => [
+                'label' => 'Rejection',
+                'count' => $rejectionCount,
+                'quantity' => $rejectionQty,
+                'unit' => $unit,
+            ],
+            'finished_goods' => [
+                'label' => 'Finished Goods',
+                'count' => $finishedCount,
+                'quantity' => $finishedStock,
+                'unit' => $unit,
+            ],
+            'daily_production' => [
+                'label' => 'Daily Production',
+                'count' => $dailyProductionCount,
+                'quantity' => $dailyProductionQty,
+                'unit' => $unit,
+            ],
+            'sales' => [
+                'label' => 'Sales',
+                'count' => $salesCount,
+                'quantity' => $salesQty,
+                'unit' => $unit,
+            ],
+        ];
+
+        $totalPieces = collect($modules)->sum(fn (array $module) => (int) ($module['quantity'] ?? 0));
+        $totalRecords = collect($modules)->sum(fn (array $module) => (int) ($module['count'] ?? 0));
+
+        return response()->json([
+            'query' => $query,
+            'item' => $item ? [
+                'id' => $item->id,
+                'code' => $item->code,
+                'name' => $item->name,
+                'description' => $item->description,
+                'unit' => $item->unit ?: 'pcs',
+            ] : null,
+            'modules' => $modules,
+            'total_records' => $totalRecords,
+            'total_pieces' => $totalPieces,
+            'unit' => $unit,
+        ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $line
+     */
+    private function purchaseRequisitionLineMatches(array $line, ?Item $item, string $like): bool
+    {
+        if ($item !== null && (int) ($line['item_id'] ?? 0) === (int) $item->id) {
+            return true;
+        }
+
+        $name = strtolower(trim((string) ($line['item_name'] ?? $line['name'] ?? '')));
+        if ($name === '') {
+            return false;
+        }
+
+        $term = trim($like, '%');
+
+        return str_contains($name, $term)
+            || ($item !== null && ($name === strtolower(trim($item->code)) || $name === strtolower(trim($item->name))));
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, SalesOrder>  $orders
+     */
+    private function sumSalesOrderPieces($orders, ?Item $item, string $like): int
+    {
+        $pieces = 0;
+        $term = trim($like, '%');
+
+        foreach ($orders as $order) {
+            $items = $order->items;
+            if (is_array($items) && $items !== []) {
+                foreach ($items as $line) {
+                    if (! is_array($line)) {
+                        continue;
+                    }
+                    if (! $this->purchaseRequisitionLineMatches($line, $item, $like)) {
+                        continue;
+                    }
+                    $pieces += (int) ($line['quantity'] ?? 0);
+                }
+
+                continue;
+            }
+
+            $product = strtolower(trim((string) $order->product_name));
+            $matches = str_contains($product, $term)
+                || ($item !== null && (
+                    (int) ($order->item_id ?? 0) === (int) $item->id
+                    || $product === strtolower(trim($item->code))
+                    || $product === strtolower(trim($item->name))
+                ));
+            if ($matches) {
+                $pieces += (int) ($order->quantity ?? 0);
+            }
+        }
+
+        return $pieces;
+    }
+
+    private function resolveCatalogItemForSearch(string $query): ?Item
+    {
+        $term = strtolower(trim($query));
+
+        $exact = Item::query()
+            ->whereRaw('LOWER(code) = ?', [$term])
+            ->first();
+        if ($exact !== null) {
+            return $exact;
+        }
+
+        return Item::query()
+            ->whereRaw('LOWER(code) LIKE ?', ['%'.$term.'%'])
+            ->orWhereRaw('LOWER(name) LIKE ?', ['%'.$term.'%'])
+            ->orderByRaw('CASE WHEN LOWER(code) LIKE ? THEN 0 ELSE 1 END', ['%'.$term.'%'])
+            ->first();
+    }
+
+    /**
+     * @return \Illuminate\Support\Collection<int, int>
+     */
+    private function workOrderIdsMatchingItem(?Item $item, string $query, string $like): \Illuminate\Support\Collection
+    {
+        return WorkOrder::query()
+            ->where(function ($builder) use ($item, $like) {
+                $builder->whereRaw('LOWER(item_code) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(product) LIKE ?', [$like]);
+                if ($item !== null) {
+                    $builder->orWhere('item_id', $item->id)
+                        ->orWhereRaw('LOWER(item_code) = ?', [strtolower(trim($item->code))])
+                        ->orWhereRaw('LOWER(product) = ?', [strtolower(trim($item->code))])
+                        ->orWhereRaw('LOWER(product) = ?', [strtolower(trim($item->name))]);
+                }
+            })
+            ->pluck('id');
     }
 }

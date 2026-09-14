@@ -19,7 +19,15 @@ class RejectionController extends Controller
 
     public function store(Request $request): JsonResponse
     {
-        $rejection = Rejection::create($this->normalizedPayload($this->validatedPayload($request)));
+        $payload = $this->normalizedPayload($this->validatedPayload($request));
+        $rejection = Rejection::create($payload);
+
+        if (filled($rejection->rework_assigned_to)) {
+            \App\Services\AppNotificationService::reworkAssigned(
+                $rejection,
+                $request->user()?->name,
+            );
+        }
 
         return response()->json($this->format($rejection), 201);
     }
@@ -34,16 +42,53 @@ class RejectionController extends Controller
     public function updateRework(Request $request, Rejection $rejection): JsonResponse
     {
         $data = $request->validate([
-            'rework_status' => 'required|string|in:pending,in_rework,completed,scrapped',
+            'rework_status' => 'nullable|string|in:pending,in_rework,completed,scrapped',
+            'rework_assigned_to' => 'nullable|string|max:255',
+            'rework_assigned_to_user_id' => 'nullable|integer|exists:users,id',
         ]);
 
-        if ($data['rework_status'] === 'in_rework' && $rejection->rework_possible === false) {
+        $nextStatus = $data['rework_status'] ?? null;
+        if ($nextStatus === 'in_rework' && $rejection->rework_possible === false) {
             throw new HttpException(422, 'This item is not eligible for rework');
         }
 
-        $rejection->update($data);
+        $updates = [];
+        if ($nextStatus !== null) {
+            $updates['rework_status'] = $nextStatus;
+        }
 
-        return response()->json($this->format($rejection->fresh()));
+        if (array_key_exists('rework_assigned_to', $data)) {
+            $updates['rework_assigned_to'] = filled($data['rework_assigned_to'])
+                ? trim($data['rework_assigned_to'])
+                : null;
+        }
+
+        if (array_key_exists('rework_assigned_to_user_id', $data)) {
+            $updates['rework_assigned_to_user_id'] = $data['rework_assigned_to_user_id'];
+        }
+
+        if (
+            filled($updates['rework_assigned_to'] ?? $rejection->rework_assigned_to)
+            && $nextStatus === null
+            && ($rejection->rework_status === 'pending' || ! isset($updates['rework_status']))
+        ) {
+            $updates['rework_status'] = 'in_rework';
+        }
+
+        $rejection->update($updates);
+        $rejection = $rejection->fresh();
+
+        if (
+            (array_key_exists('rework_assigned_to', $data) || array_key_exists('rework_assigned_to_user_id', $data))
+            && filled($rejection->rework_assigned_to)
+        ) {
+            \App\Services\AppNotificationService::reworkAssigned(
+                $rejection,
+                $request->user()?->name,
+            );
+        }
+
+        return response()->json($this->format($rejection));
     }
 
     private function validatedPayload(Request $request, bool $isUpdate = false): array
@@ -68,6 +113,7 @@ class RejectionController extends Controller
             'rework_possible' => 'nullable|boolean',
             'reported_by' => 'nullable|string|max:255',
             'rework_assigned_to' => 'nullable|string|max:255',
+            'rework_assigned_to_user_id' => 'nullable|integer|exists:users,id',
             'total_produced' => 'nullable|integer|min:0',
             'notes' => 'nullable|string',
         ]);
@@ -93,6 +139,7 @@ class RejectionController extends Controller
             'rework_possible' => $rejection->rework_possible,
             'reported_by' => $rejection->reported_by,
             'rework_assigned_to' => $rejection->rework_assigned_to,
+            'rework_assigned_to_user_id' => $rejection->rework_assigned_to_user_id,
             'total_produced' => $rejection->total_produced,
             'notes' => $rejection->notes,
             'date' => $rejection->rejection_date?->format('Y-m-d'),
@@ -114,6 +161,13 @@ class RejectionController extends Controller
         }
 
         unset($validated['date']);
+
+        if (
+            filled($validated['rework_assigned_to'] ?? null)
+            && empty($validated['rework_status'])
+        ) {
+            $validated['rework_status'] = 'in_rework';
+        }
 
         return $validated;
     }

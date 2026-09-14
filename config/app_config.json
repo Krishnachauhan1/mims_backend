@@ -163,6 +163,27 @@
       },
 
       {
+        "id": "daily_production",
+        "name": "Daily Production",
+        "icon": "fact_check_outlined",
+        "route": "/daily-production",
+        "section": "operations",
+        "order": 4,
+        "entry_permission": "daily_production.view",
+        "permissions": [
+          {
+            "key": "daily_production.view",
+            "label": "View Daily Production Log",
+            "is_entry": true
+          },
+          {
+            "key": "daily_production.manage",
+            "label": "Log / Edit Daily Production"
+          }
+        ]
+      },
+
+      {
         "id": "quality",
         "name": "Quality",
         "icon": "verified_outlined",
@@ -183,6 +204,27 @@
           {
             "key": "quality.approve",
             "label": "Approve / Reject Batch"
+          }
+        ]
+      },
+
+      {
+        "id": "packing",
+        "name": "Packing",
+        "icon": "inventory_outlined",
+        "route": "/packing",
+        "section": "operations",
+        "order": 5,
+        "entry_permission": "packing.view",
+        "permissions": [
+          {
+            "key": "packing.view",
+            "label": "View Packing Queue",
+            "is_entry": true
+          },
+          {
+            "key": "packing.manage",
+            "label": "Update / Complete Packing"
           }
         ]
       },
@@ -550,9 +592,15 @@
           "workflow.update_status",
           "production.view",
           "production.update",
+          "daily_production.view",
+          "daily_production.manage",
+          "expenses.view",
+          "expenses.manage",
           "quality.view",
           "quality.inspect",
           "quality.approve",
+          "packing.view",
+          "packing.manage",
           "rejection.view",
           "rejection.create",
           "rejection.edit",
@@ -566,6 +614,8 @@
           "machinery.manage",
           "reports.view",
           "reports.export",
+          "expenses.view",
+          "expenses.manage",
           "checkin.view",
           "notifications.view"
         ]
@@ -590,6 +640,8 @@
           "quality.view",
           "quality.inspect",
           "quality.approve",
+          "packing.view",
+          "packing.manage",
           "clients.view",
           "sales_tracking.view",
           "sales_tracking.manage",
@@ -603,6 +655,8 @@
           "purchase_order.approve",
           "machinery.view",
           "reports.view",
+          "expenses.view",
+          "expenses.manage",
           "notifications.view"
         ]
       },
@@ -621,11 +675,15 @@
           "workflow.view",
           "workflow.move",
           "production.view",
+          "daily_production.view",
+          "daily_production.manage",
           "job_work.view",
           "job_work.manage",
           "quality.view",
           "quality.inspect",
           "quality.approve",
+          "packing.view",
+          "packing.manage",
           "rejection.view",
           "rejection.create",
           "rejection.edit",
@@ -1146,8 +1204,16 @@
       "label": "Production Operator"
     },
     {
+      "key": "helper",
+      "label": "Helper"
+    },
+    {
       "key": "quality_inspector",
       "label": "Quality Inspector"
+    },
+    {
+      "key": "packing_operator",
+      "label": "Packing"
     },
     {
       "key": "maintenance_technician",

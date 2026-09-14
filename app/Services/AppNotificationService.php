@@ -652,6 +652,56 @@ class AppNotificationService
         );
     }
 
+    public static function reworkAssigned(
+        Rejection $rejection,
+        ?string $assignedByName = null,
+    ): void {
+        $assignee = null;
+
+        if ($rejection->rework_assigned_to_user_id !== null) {
+            $assignee = User::query()
+                ->where('is_active', true)
+                ->find($rejection->rework_assigned_to_user_id);
+        }
+
+        if ($assignee === null && filled($rejection->rework_assigned_to)) {
+            $assignee = User::query()
+                ->where('is_active', true)
+                ->whereRaw('LOWER(TRIM(name)) = ?', [strtolower(trim($rejection->rework_assigned_to))])
+                ->first();
+        }
+
+        if ($assignee === null) {
+            return;
+        }
+
+        $assigner = $assignedByName ?? request()->user()?->name ?? 'Quality';
+        $itemLabel = filled($rejection->item_code)
+            ? $rejection->item_code
+            : $rejection->product_name;
+        $batch = $rejection->batch_number ?? ('REJ-'.$rejection->id);
+
+        self::create(
+            title: 'Rework assigned',
+            message: "{$assigner} assigned you rework for {$rejection->quantity} unit(s) of "
+                ."{$itemLabel} — {$rejection->reason} (batch {$batch})",
+            type: 'rework_assigned',
+            severity: 'warning',
+            module: 'Rejection',
+            reference: $batch,
+            route: '/rejection',
+            userId: $assignee->id,
+            extraData: [
+                'rejection_id' => (string) $rejection->id,
+                'batch_number' => $batch,
+                'item_code' => $rejection->item_code ?? '',
+                'product_name' => $rejection->product_name,
+                'quantity' => (string) $rejection->quantity,
+                'reason' => $rejection->reason,
+            ],
+        );
+    }
+
     public static function qualityInspectionFailed(
         QualityInspection $inspection,
         string $reason,

@@ -10,6 +10,8 @@ class WorkOrderMaterial extends Model
     protected $fillable = [
         'work_order_id',
         'inventory_item_id',
+        'grade',
+        'diameter_mm',
         'quantity',
         'unit',
     ];

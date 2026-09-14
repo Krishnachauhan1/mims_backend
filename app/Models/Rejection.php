@@ -14,6 +14,7 @@ class Rejection extends Model
         'product_name',
         'item_code',
         'stage',
+        'stage_order',
         'quantity',
         'unit_cost',
         'scrap_cost',
@@ -25,6 +26,7 @@ class Rejection extends Model
         'rework_possible',
         'reported_by',
         'rework_assigned_to',
+        'rework_assigned_to_user_id',
         'total_produced',
         'notes',
     ];

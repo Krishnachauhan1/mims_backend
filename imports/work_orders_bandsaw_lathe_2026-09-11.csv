@@ -1,0 +1,35 @@
+route_card_no,workflow_name,item_code,product,client_name,quantity,unit,pr_number,priority,remarks,status
+RC-4789-C7205973,Standard Manufacturing,C7205973,Φ42 x 170,,53,pcs,4789,normal,Grade: EN 8D | Station: SNO6 | Incoming 11/09/24,pending
+RC-4791-S0121105000,Standard Manufacturing,S0121105000,Φ48 x 217,,54,pcs,4791,normal,Grade: EN-19 | Station: SNO8 | Incoming 11/09/24,pending
+RC-4790-602012080000,Standard Manufacturing,602012080000,Φ28 x 142,,55,pcs,4790,normal,Grade: EN 8D | Station: SONO8 | Incoming 11/09/24,pending
+RC-4776-101142200300,Standard Manufacturing,101142200300,Φ53 x 145,,535,pcs,4776,normal,Grade: EN8D | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4764-C7202226,Standard Manufacturing,C7202226,Φ28 x 111,,117,pcs,4764,normal,Grade: EN8D | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4766-C7228963,Standard Manufacturing,C7228963,Φ42 x 87,,54,pcs,4766,normal,Grade: EN8 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4765-102011424700,Standard Manufacturing,102011424700,Φ75 x 152,,38,pcs,4765,normal,Grade: EN8D | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4771-604024160400,Standard Manufacturing,604024160400,Φ85 x 89,,10,pcs,4771,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4768-501312130000,Standard Manufacturing,501312130000,Φ60 x 149,,23,pcs,4768,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4761-101221452900,Standard Manufacturing,101221452900,Φ42 x 270,,39,pcs,4761,normal,Grade: EN8D | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4719-190513010003,Standard Manufacturing,190513010003,Φ80 x 219,,201,pcs,4719,normal,Grade: EN8D | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4737-501316020000,Standard Manufacturing,501316020000,Φ50 x 162,,257,pcs,4737,normal,Grade: EN18 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4743-501301140000,Standard Manufacturing,501301140000,Φ50 x 168,,50,pcs,4743,normal,Grade: EN18 | WT 2.600 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4736-501501140000,Standard Manufacturing,501501140000,Φ50 x 177,,158,pcs,4736,normal,Grade: EN18 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4750-501236090000-A,Standard Manufacturing,501236090000,Φ25 x 140,,259,pcs,4750,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4774-501312120000,Standard Manufacturing,501312120000,Φ60 x 217,,151,pcs,4774,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4722-841M20130000,Standard Manufacturing,841M20130000,Φ40 x 250,,200,pcs,4722,normal,Grade: EN8D | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4721-841M20120000,Standard Manufacturing,841M20120000,Φ40 x 350,,174,pcs,4721,normal,Grade: EN8D | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4750-501236090000-B,Standard Manufacturing,501236090000,Φ25 x 140,,258,pcs,4750,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24 | Qty line 2,pending
+RC-4760-501209220000,Standard Manufacturing,501209220000,Φ40 x 94,,268,pcs,4760,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4718-C7333619,Standard Manufacturing,C7333619,Φ63 x 215,,154,pcs,4718,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4717-200523220600,Standard Manufacturing,200523220600,Φ63 x 302,,103,pcs,4717,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4781-190533030040,Standard Manufacturing,190533030040,Φ22 x 97,,201,pcs,4781,normal,Grade: EN8 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4782-190515050003,Standard Manufacturing,190515050003,Φ45 x 142,,22,pcs,4782,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4783-103511432000,Standard Manufacturing,103511432000,Φ56 x 423,,4,pcs,4783,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4768-530021201300,Standard Manufacturing,530021201300,Φ42 x 107,,105,pcs,4768,normal,Grade: EN8 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4784-060710,Standard Manufacturing,060710,Φ27 x 226,,17,pcs,4784,normal,Grade: M.S | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4785-501210020100,Standard Manufacturing,501210020100,Φ116 x 47,,14,pcs,4785,normal,Grade: EN8D | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4767-501312130000,Standard Manufacturing,501312130000,Φ60 x 149,,25,pcs,4767,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4769-C7210807,Standard Manufacturing,C7210807,Φ53 x 147,,35,pcs,4769,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4748-C7224481,Standard Manufacturing,C7224481,Φ50 x 196,,335,pcs,4748,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4786-826M3057000,Standard Manufacturing,826M3057000,Φ40 x 87,,10,pcs,4786,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4787-841V2615700,Standard Manufacturing,841V2615700,Φ53 x 207,,15,pcs,4787,normal,Grade: EN8 | Bandsaw and Lathe Area | Incoming 11/09/24,pending
+RC-4788-C7224480,Standard Manufacturing,C7224480,Φ50 x 272,,7,pcs,4788,normal,Grade: EN19 | Bandsaw and Lathe Area | Incoming 11/09/24,pending

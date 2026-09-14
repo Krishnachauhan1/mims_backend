@@ -25,6 +25,7 @@ class WorkOrder extends Model
         'stages',
         'is_job_work',
         'supervisor_status',
+        'priority',
         'flow_step',
         'created_by',
         'updated_by',

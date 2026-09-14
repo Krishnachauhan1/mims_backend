@@ -6,17 +6,269 @@ use App\Http\Controllers\Controller;
 use App\Models\Client;
 use App\Models\FinishedGood;
 use App\Models\InventoryItem;
+use App\Models\Machinery;
 use App\Models\ProductionBatch;
 use App\Models\PurchaseOrder;
 use App\Models\Rejection;
 use App\Models\SalesOrder;
 use App\Models\Vendor;
+use App\Models\WorkOrder;
+use App\Services\BatchStageMachineService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 
 class ReportController extends Controller
 {
+    public function machineActiveWork(Request $request): JsonResponse
+    {
+        try {
+            return response()->json($this->buildMachineActiveWorkPayload($request));
+        } catch (\Throwable $e) {
+            report($e);
+            Log::error('[API][reports/machine-active-work] failed', [
+                'message' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            ]);
+
+            return response()->json([
+                'message' => 'Failed to load machine active work report',
+                'summary' => [
+                    'total_machines' => 0,
+                    'busy_machines' => 0,
+                    'idle_machines' => 0,
+                    'total_active_jobs' => 0,
+                    'total_active_quantity' => 0,
+                    'generated_at' => now()->format('Y-m-d H:i'),
+                ],
+                'machines' => [],
+            ], 500);
+        }
+    }
+
+    /**
+     * @return array{summary: array<string, mixed>, machines: array<int, array<string, mixed>>}
+     */
+    private function buildMachineActiveWorkPayload(Request $request): array
+    {
+        $batchStageMachine = app(BatchStageMachineService::class);
+        $includeOnHold = filter_var($request->query('include_on_hold', false), FILTER_VALIDATE_BOOL);
+        $machineFilter = $request->filled('machine_id')
+            ? (int) $request->query('machine_id')
+            : null;
+
+        $machinesQuery = Machinery::query();
+        if (Schema::hasColumn('machinery', 'sequence')) {
+            $machinesQuery->orderBy('sequence');
+        }
+        $machines = $machinesQuery->orderBy('id')->get();
+
+        $batchQuery = ProductionBatch::query()
+            ->with(['workflow'])
+            ->where('status', '!=', 'completed');
+
+        if (! $includeOnHold) {
+            $batchQuery->where('status', '!=', 'on_hold');
+        }
+
+        $batches = $batchQuery->get();
+
+        $workOrdersById = $this->workOrdersForBatches($batches);
+
+        $machineRows = [];
+        foreach ($machines as $machine) {
+            $machineRows[(int) $machine->id] = [
+                'machine_id' => (int) $machine->id,
+                'machine_code' => $machine->machine_code,
+                'machine_name' => $machine->name,
+                'type' => $machine->type,
+                'location' => $machine->location,
+                'capacity' => $machine->capacity,
+                'status' => $machine->status,
+                'default_stage' => $machine->default_stage,
+                'active_job_count' => 0,
+                'active_quantity' => 0,
+                'is_busy' => false,
+                'jobs' => [],
+            ];
+        }
+
+        $unassigned = [
+            'machine_id' => null,
+            'machine_code' => null,
+            'machine_name' => 'Unassigned / No machine',
+            'type' => null,
+            'location' => null,
+            'capacity' => null,
+            'status' => 'unknown',
+            'default_stage' => null,
+            'active_job_count' => 0,
+            'active_quantity' => 0,
+            'is_busy' => false,
+            'jobs' => [],
+        ];
+
+        foreach ($batches as $batch) {
+            try {
+                $currentStage = $batchStageMachine->currentStageForBatch(
+                    $batch,
+                    $workOrdersById,
+                );
+            } catch (\Throwable $e) {
+                Log::warning('[API][reports/machine-active-work] stage resolve failed', [
+                    'batch_id' => $batch->id,
+                    'error' => $e->getMessage(),
+                ]);
+                continue;
+            }
+
+            if ($currentStage === null) {
+                continue;
+            }
+
+            $machineId = $batchStageMachine->machineIdForStage($currentStage);
+            $job = $this->formatMachineActiveJob(
+                $batch,
+                $currentStage,
+                $workOrdersById[(int) $batch->work_order_id] ?? null,
+            );
+
+            if ($machineId !== null && isset($machineRows[$machineId])) {
+                $machineRows[$machineId]['jobs'][] = $job;
+                $machineRows[$machineId]['active_job_count']++;
+                $machineRows[$machineId]['active_quantity'] += (int) $batch->quantity;
+                $machineRows[$machineId]['is_busy'] = true;
+            } else {
+                $unassigned['jobs'][] = $job;
+                $unassigned['active_job_count']++;
+                $unassigned['active_quantity'] += (int) $batch->quantity;
+                $unassigned['is_busy'] = true;
+            }
+        }
+
+        $rows = array_values($machineRows);
+        if ($unassigned['active_job_count'] > 0) {
+            $rows[] = $unassigned;
+        }
+
+        if ($machineFilter !== null) {
+            $rows = array_values(array_filter(
+                $rows,
+                fn (array $row) => (int) ($row['machine_id'] ?? 0) === $machineFilter,
+            ));
+        }
+
+        $busyCount = collect($machineRows)->where('is_busy', true)->count();
+        $totalJobs = (int) collect($rows)->sum('active_job_count');
+        $totalQty = (int) collect($rows)->sum('active_quantity');
+
+        return [
+            'summary' => [
+                'total_machines' => $machines->count(),
+                'busy_machines' => $busyCount,
+                'idle_machines' => max(0, $machines->count() - $busyCount),
+                'total_active_jobs' => $totalJobs,
+                'total_active_quantity' => $totalQty,
+                'generated_at' => now()->format('Y-m-d H:i'),
+            ],
+            'machines' => $rows,
+        ];
+    }
+
+    /**
+     * @param  iterable<int, ProductionBatch>  $batches
+     * @return array<int, WorkOrder>
+     */
+    private function workOrdersForBatches(iterable $batches): array
+    {
+        if (! Schema::hasColumn('production_batches', 'work_order_id')) {
+            return [];
+        }
+
+        $ids = [];
+        foreach ($batches as $batch) {
+            if (! empty($batch->work_order_id)) {
+                $ids[] = (int) $batch->work_order_id;
+            }
+        }
+
+        $ids = array_values(array_unique($ids));
+        if ($ids === []) {
+            return [];
+        }
+
+        return WorkOrder::query()
+            ->whereIn('id', $ids)
+            ->get()
+            ->keyBy('id')
+            ->all();
+    }
+
+    /**
+     * @param  array<string, mixed>  $currentStage
+     * @return array<string, mixed>
+     */
+    private function formatMachineActiveJob(
+        ProductionBatch $batch,
+        array $currentStage,
+        ?WorkOrder $workOrder = null,
+    ): array {
+        if ($workOrder === null && ! empty($batch->work_order_id)) {
+            $workOrder = WorkOrder::query()->find($batch->work_order_id);
+        }
+
+        $routeCard = null;
+        if ($workOrder !== null) {
+            $routeCard = $workOrder->route_card_no ?? $workOrder->workflow_name ?? null;
+        }
+        $routeCard ??= $batch->workflow?->name;
+
+        return [
+            'batch_id' => (int) $batch->id,
+            'batch_number' => (string) $batch->batch_number,
+            'product_name' => (string) ($batch->product_name ?: 'Product'),
+            'quantity' => (int) $batch->quantity,
+            'unit' => $batch->unit,
+            'current_stage' => (string) ($batch->current_stage ?? ($currentStage['name'] ?? '—')),
+            'stage_order' => (int) ($batch->stage_order ?? 1),
+            'total_stages' => (int) ($batch->total_stages ?? 1),
+            'status' => (string) ($batch->status ?? 'in_progress'),
+            'priority' => Schema::hasColumn('production_batches', 'priority')
+                ? (string) ($batch->priority ?? 'normal')
+                : 'normal',
+            'work_order_id' => $batch->work_order_id,
+            'route_card_no' => $routeCard,
+            'client_name' => $batch->client_name ?? $workOrder?->client_name,
+            'stage_started_at' => $this->safeReportDateTime($batch->stage_started_at ?? $batch->started_at),
+            'started_at' => $this->safeReportDateTime($batch->started_at ?? $batch->created_at),
+            'operator' => $batch->assigned_to ?? $batch->user_name ?? $batch->performed_by,
+            'hold_reason' => $batch->hold_reason,
+            'machine_name' => $currentStage['machine_name'] ?? null,
+            'machine_code' => $currentStage['machine_code'] ?? null,
+            'is_job_work_stage' => (bool) ($currentStage['is_job_work'] ?? false),
+        ];
+    }
+
+    private function safeReportDateTime(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if ($value instanceof \DateTimeInterface) {
+            return $value->format('Y-m-d H:i');
+        }
+
+        try {
+            return Carbon::parse((string) $value)->format('Y-m-d H:i');
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
     public function inventory(): JsonResponse
     {
         return response()->json(

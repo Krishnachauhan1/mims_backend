@@ -17,6 +17,9 @@ class InventoryCostService
     /** @var Collection<string, Item> */
     private Collection $itemsByName;
 
+    /** @var array<string, Item> */
+    private array $itemsByLookupKey = [];
+
     /** @var Collection<string, PurchaseOrder> */
     private Collection $purchaseOrdersByNumber;
 
@@ -31,9 +34,9 @@ class InventoryCostService
 
     public function warmFor(Collection $inventoryItems): void
     {
-        $this->itemsByName = Item::query()
-            ->get()
-            ->keyBy(fn (Item $item) => $this->normalizeKey($item->name));
+        $items = Item::query()->get();
+        $this->itemsByName = $items->keyBy(fn (Item $item) => $this->normalizeKey($item->name));
+        $this->buildCatalogLookupIndex($items);
 
         $poNumbers = $inventoryItems
             ->pluck('batch_number')
@@ -68,6 +71,68 @@ class InventoryCostService
         $this->processesByName = Process::query()
             ->get()
             ->keyBy(fn (Process $process) => $this->normalizeKey($process->name));
+    }
+
+    /**
+     * @return array{item_code: ?string, description: ?string, catalog_name: ?string}
+     */
+    public function catalogDisplayFor(InventoryItem $item): array
+    {
+        $this->ensureMasterItemsLoaded();
+
+        $master = null;
+        foreach ([$item->name, $item->sku] as $value) {
+            if (! filled($value)) {
+                continue;
+            }
+
+            $master = $this->itemsByLookupKey[$this->normalizeKey($value)] ?? null;
+            if ($master !== null) {
+                break;
+            }
+        }
+
+        if ($master === null) {
+            return [
+                'item_code' => null,
+                'description' => null,
+                'catalog_name' => null,
+            ];
+        }
+
+        $code = filled($master->code) ? trim((string) $master->code) : null;
+        $description = filled($master->description) ? trim((string) $master->description) : null;
+        if ($description !== null && $code !== null && strcasecmp($description, $code) === 0) {
+            $description = null;
+        }
+
+        return [
+            'item_code' => $code,
+            'description' => $description,
+            'catalog_name' => filled($master->name) ? trim((string) $master->name) : null,
+        ];
+    }
+
+    /**
+     * @param  Collection<int, Item>  $items
+     */
+    private function buildCatalogLookupIndex(Collection $items): void
+    {
+        $this->itemsByLookupKey = [];
+
+        foreach ($items as $item) {
+            foreach ([$item->name, $item->code, $item->description] as $value) {
+                if (filled($value)) {
+                    $this->itemsByLookupKey[$this->normalizeKey($value)] = $item;
+                }
+            }
+
+            if (filled($item->grade) && (float) ($item->diameter_mm ?? 0) > 0) {
+                $dia = (float) $item->diameter_mm;
+                $diaLabel = fmod($dia, 1.0) === 0.0 ? (string) (int) $dia : (string) $dia;
+                $this->itemsByLookupKey[$this->normalizeKey(strtoupper($item->grade).' DIA '.$diaLabel)] = $item;
+            }
+        }
     }
 
     /**
@@ -345,6 +410,8 @@ class InventoryCostService
         $this->itemsByName = Item::query()
             ->get()
             ->keyBy(fn (Item $item) => $this->normalizeKey($item->name));
+
+        $this->buildCatalogLookupIndex($this->itemsByName->values());
     }
 
     private function purchasePriceFromOrder(PurchaseOrder $purchaseOrder, string $itemName): ?float
@@ -386,6 +453,6 @@ class InventoryCostService
 
     private function normalizeKey(?string $value): string
     {
-        return Str::lower(trim((string) $value));
+        return Str::lower(preg_replace('/[^a-z0-9]+/i', '', trim((string) $value)));
     }
 }

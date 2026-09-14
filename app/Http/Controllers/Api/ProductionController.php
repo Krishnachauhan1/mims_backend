@@ -13,9 +13,13 @@ use App\Models\WorkOrder;
 use App\Models\Workflow;
 use App\Services\AppNotificationService;
 use App\Services\JobWorkFlowService;
+use App\Services\MaterialSpecResolver;
 use App\Services\TaskMaterialService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 
 class ProductionController extends Controller
@@ -23,15 +27,55 @@ class ProductionController extends Controller
     public function __construct(
         private JobWorkFlowService $jobWorkFlow,
         private TaskMaterialService $taskMaterials,
+        private MaterialSpecResolver $materialSpec,
     ) {}
     public function batches(): JsonResponse
     {
-        return response()->json(
-            ProductionBatch::with('workflow')
-                ->latest()
-                ->get()
-                ->map(fn (ProductionBatch $batch) => $this->format($batch)),
-        );
+        $payload = [];
+        $failedIds = [];
+        $ids = DB::table('production_batches')->orderByDesc('id')->pluck('id');
+
+        Log::info('[API][production/batches] start', [
+            'user_id' => auth()->id(),
+            'batch_count' => $ids->count(),
+        ]);
+
+        foreach ($ids as $id) {
+            try {
+                $batch = ProductionBatch::with(['workflow', 'workOrder'])->find($id);
+                if ($batch === null) {
+                    continue;
+                }
+                $payload[] = $this->format($batch);
+            } catch (\Throwable $e) {
+                report($e);
+                $failedIds[] = (int) $id;
+                Log::warning('[API][production/batches] format failed', [
+                    'batch_id' => (int) $id,
+                    'error' => $e->getMessage(),
+                ]);
+                $fallback = $this->formatBatchFallback((int) $id);
+                if ($fallback !== null) {
+                    $payload[] = $fallback;
+                }
+            }
+        }
+
+        Log::info('[API][production/batches] done', [
+            'user_id' => auth()->id(),
+            'returned' => count($payload),
+            'failed_ids' => $failedIds,
+            'batches' => collect($payload)->map(fn ($b) => [
+                'id' => $b['id'] ?? null,
+                'batch_number' => $b['batch_number'] ?? null,
+                'status' => $b['status'] ?? null,
+                'current_stage' => $b['current_stage'] ?? null,
+                'work_order_id' => $b['work_order_id'] ?? null,
+                'product' => $b['product'] ?? null,
+            ])->values()->all(),
+        ]);
+
+        return response()->json($payload);
     }
 
     public function store(Request $request): JsonResponse
@@ -58,6 +102,7 @@ class ProductionController extends Controller
             'user_name' => 'nullable|string|max:255',
             'checkin_id' => 'nullable|integer',
             'work_order_id' => 'nullable|integer',
+            'priority' => 'nullable|string|in:normal,urgent',
             'stage_history' => 'nullable|array',
             'activity_log' => 'nullable|array',
         ]);
@@ -77,6 +122,7 @@ class ProductionController extends Controller
             'total_stages' => $data['total_stages'] ?? 1,
             'quantity' => $data['quantity'],
             'status' => $data['status'] ?? 'in_progress',
+            'priority' => $data['priority'] ?? 'normal',
             'started_at' => $data['started_at'] ?? null,
             'stage_started_at' => $data['stage_started_at'] ?? null,
             'pr_number' => $data['pr_number'] ?? null,
@@ -93,7 +139,16 @@ class ProductionController extends Controller
             'activity_log' => $data['activity_log'] ?? [],
         ]);
 
-        $this->taskMaterials->consumeForProductionBatch($batch, $request->user()?->id);
+        try {
+            $this->taskMaterials->consumeForProductionBatch($batch, $request->user()?->id);
+        } catch (\Throwable $e) {
+            report($e);
+            Log::warning('[API][production/batches] material consume failed', [
+                'batch_id' => $batch->id,
+                'work_order_id' => $batch->work_order_id,
+                'error' => $e->getMessage(),
+            ]);
+        }
 
         return response()->json($this->format($batch->fresh('workflow')), 201);
     }
@@ -108,6 +163,7 @@ class ProductionController extends Controller
 
         $batch = ProductionBatch::with('workflow')->findOrFail($data['batch_id']);
         $this->assertMachineOperatorCanUpdateStage($request->user(), $batch);
+        $this->assertBatchHasGoodUnits($batch);
 
         if ($data['direction'] === 'forward' && $this->jobWorkFlow->isBatchAtJobWorkStage($batch)) {
             $flowState = $this->jobWorkFlow->flowState($batch);
@@ -121,7 +177,7 @@ class ProductionController extends Controller
 
         if ($data['direction'] === 'forward' && isset($data['quantity'])) {
             $moveQty = (int) $data['quantity'];
-            $batchQty = max(1, (int) $batch->quantity);
+            $batchQty = max(0, (int) $batch->quantity);
 
             if ($moveQty > $batchQty) {
                 throw new HttpException(422, 'Quantity exceeds available batch quantity');
@@ -339,6 +395,7 @@ class ProductionController extends Controller
 
         $batch = ProductionBatch::with('workflow')->findOrFail($data['batch_id']);
         $this->assertMachineOperatorCanUpdateStage($request->user(), $batch);
+        $this->assertBatchHasGoodUnits($batch);
 
         if ($batch->status === 'completed') {
             throw new HttpException(422, 'Batch is already completed');
@@ -382,6 +439,7 @@ class ProductionController extends Controller
 
         $batch = ProductionBatch::with('workflow')->findOrFail($data['batch_id']);
         $this->assertNotMachineOperatorOnly($request->user());
+        $this->assertBatchHasGoodUnits($batch);
 
         if ($batch->status === 'completed') {
             throw new HttpException(422, 'Batch is already completed');
@@ -402,6 +460,18 @@ class ProductionController extends Controller
             $this->registerCompletedBatchOutputs($batch);
         } catch (\Throwable) {
             // Batch stays completed even if inventory sync fails.
+        }
+
+        try {
+            app(\App\Services\ItemAverageTimeService::class)->recalculateForBatch($batch);
+        } catch (\Throwable) {
+            // Batch stays completed even if average time sync fails.
+        }
+
+        try {
+            app(\App\Services\ItemMachineTimeService::class)->recalculateAveragesForBatch($batch);
+        } catch (\Throwable) {
+            // Batch stays completed even if machine average sync fails.
         }
 
         return response()->json($this->format($batch));
@@ -591,12 +661,35 @@ class ProductionController extends Controller
             'reason' => 'required|string|max:255',
             'quantity' => 'nullable|integer|min:1',
             'notes' => 'nullable|string|max:500',
+            'stage_label' => 'nullable|string|max:255',
             'rework_possible' => 'nullable|boolean',
+            'rework_assigned_to' => 'nullable|string|max:255',
+            'rework_assigned_to_user_id' => 'nullable|integer|exists:users,id',
         ]);
 
         $quantity = max(1, (int) ($data['quantity'] ?? 1));
         $itemCode = trim($data['item_code']);
         $operator = $request->user()?->name ?? 'Operator';
+        $assigneeName = filled($data['rework_assigned_to'] ?? null)
+            ? trim($data['rework_assigned_to'])
+            : null;
+        $batchQty = max(0, (int) $batch->quantity);
+
+        if ($batchQty < 1) {
+            throw new HttpException(422, 'No good units remaining in this batch');
+        }
+
+        if ($quantity > $batchQty) {
+            throw new HttpException(
+                422,
+                "Cannot reject {$quantity} unit(s). Only {$batchQty} good unit(s) remaining in this batch.",
+            );
+        }
+
+        $remainingQty = $batchQty - $quantity;
+        $stageLabel = filled($data['stage_label'] ?? null)
+            ? trim($data['stage_label'])
+            : $this->resolveBatchStageDisplayLabel($batch);
 
         $rejection = Rejection::create([
             'production_batch_id' => $batch->id,
@@ -604,16 +697,18 @@ class ProductionController extends Controller
             'batch_number' => $batch->batch_number,
             'product_name' => $batch->product_name,
             'item_code' => $itemCode,
-            'stage' => $batch->current_stage,
+            'stage' => $stageLabel,
+            'stage_order' => max(1, (int) $batch->stage_order),
             'quantity' => $quantity,
             'reason' => trim($data['reason']),
             'notes' => $data['notes'] ?? null,
-            'rework_status' => 'pending',
             'rework_possible' => $data['rework_possible'] ?? true,
             'user_id' => $request->user()?->id,
             'reported_by' => $operator,
-            'rework_assigned_to' => $operator,
-            'total_produced' => max(1, (int) $batch->quantity),
+            'rework_assigned_to' => $assigneeName,
+            'rework_assigned_to_user_id' => $data['rework_assigned_to_user_id'] ?? null,
+            'rework_status' => $assigneeName !== null ? 'in_rework' : 'pending',
+            'total_produced' => $batchQty,
             'rejection_date' => now(),
         ]);
 
@@ -622,11 +717,35 @@ class ProductionController extends Controller
             $activityLog = [];
         }
         $activityLog[] = [
-            'action' => 'item_rejected',
-            'message' => "{$operator} rejected {$quantity} unit(s) of {$itemCode} — {$data['reason']}",
-            'at' => now()->toIso8601String(),
+            'action' => "Rejected at {$stageLabel}",
+            'user' => $operator,
+            'time' => now()->format('Y-m-d H:i'),
+            'message' => "{$quantity} unit(s) of {$itemCode} — {$data['reason']}. "
+                ."{$remainingQty} good unit(s) remain in workflow.",
+            'stage' => $stageLabel,
+            'type' => 'rejection',
+            'quantity' => $quantity,
+            'item_code' => $itemCode,
         ];
-        $batch->update(['activity_log' => $activityLog]);
+
+        $batchUpdates = [
+            'quantity' => $remainingQty,
+            'activity_log' => $activityLog,
+        ];
+
+        if ($remainingQty < 1) {
+            $batchUpdates['status'] = 'completed';
+            $batchUpdates['completed_at'] = now();
+            $batchUpdates['awaiting_final_completion_at'] = null;
+            $activityLog[] = [
+                'action' => 'batch_closed',
+                'message' => 'All units rejected — batch closed without final QC',
+                'at' => now()->toIso8601String(),
+            ];
+            $batchUpdates['activity_log'] = $activityLog;
+        }
+
+        $batch->update($batchUpdates);
 
         try {
             AppNotificationService::batchItemRejected(
@@ -634,6 +753,9 @@ class ProductionController extends Controller
                 $rejection,
                 $operator,
             );
+            if (filled($rejection->rework_assigned_to)) {
+                AppNotificationService::reworkAssigned($rejection, $operator);
+            }
         } catch (\Throwable) {
             // Keep rejection saved even if notification fails.
         }
@@ -652,6 +774,8 @@ class ProductionController extends Controller
             'rework_possible' => $rejection->rework_possible,
             'reported_by' => $rejection->reported_by,
             'created_at' => $rejection->created_at?->format('Y-m-d H:i'),
+            'remaining_batch_quantity' => $remainingQty,
+            'batch' => $this->format($batch->fresh('workflow')),
         ], 201);
     }
 
@@ -677,6 +801,29 @@ class ProductionController extends Controller
         ]);
 
         return response()->json($this->format($batch->fresh('workflow')));
+    }
+
+    public function updatePriority(Request $request, ProductionBatch $batch): JsonResponse
+    {
+        $data = $request->validate([
+            'priority' => 'required|string|in:normal,urgent',
+        ]);
+
+        $this->assertNotMachineOperatorOnly($request->user());
+
+        $batch->update(['priority' => $data['priority']]);
+
+        return response()->json($this->format($batch->fresh('workflow')));
+    }
+
+    private function assertBatchHasGoodUnits(ProductionBatch $batch): void
+    {
+        if ((int) $batch->quantity < 1) {
+            throw new HttpException(
+                422,
+                'No good units remaining in this batch — rejected items do not continue in the workflow',
+            );
+        }
     }
 
     private function assertNotMachineOperatorOnly(?User $user): void
@@ -794,6 +941,68 @@ class ProductionController extends Controller
     }
 
     /**
+     * Machine / vendor label shown in tracking — e.g. LATHE-1A, CNC Mill.
+     */
+    private function resolveBatchStageDisplayLabel(ProductionBatch $batch): string
+    {
+        $stages = $this->resolveStagesForBatch($batch);
+        $order = max(1, (int) $batch->stage_order);
+        $stage = $stages[$order - 1] ?? null;
+
+        if (! is_array($stage)) {
+            return trim((string) ($batch->current_stage ?? 'Unknown stage'));
+        }
+
+        return $this->resolveStageDisplayLabel($stage);
+    }
+
+    /**
+     * @param  array<string, mixed>  $stage
+     */
+    private function resolveStageDisplayLabel(array $stage): string
+    {
+        if (! empty($stage['machine_id'])) {
+            $machine = \App\Models\Machinery::query()->find((int) $stage['machine_id']);
+            if ($machine !== null) {
+                $name = trim((string) $machine->name);
+                if ($name !== '') {
+                    return $name;
+                }
+            }
+        }
+
+        $machineName = trim((string) ($stage['machine_name'] ?? ''));
+        if ($machineName !== '') {
+            return $machineName;
+        }
+
+        $machineCode = trim((string) ($stage['machine_code'] ?? ''));
+        if ($machineCode !== '') {
+            $machine = \App\Models\Machinery::query()
+                ->where('machine_code', $machineCode)
+                ->first();
+            if ($machine !== null) {
+                $name = trim((string) $machine->name);
+                if ($name !== '') {
+                    return $name;
+                }
+            }
+        }
+
+        $vendorName = trim((string) ($stage['vendor_name'] ?? ''));
+        if ($vendorName !== '') {
+            return $vendorName;
+        }
+
+        $processName = trim((string) ($stage['name'] ?? ''));
+        if ($processName !== '') {
+            return $processName;
+        }
+
+        return 'Unknown stage';
+    }
+
+    /**
      * @return array<int, array<string, mixed>>
      */
     private function resolveStagesForBatch(ProductionBatch $batch): array
@@ -832,6 +1041,13 @@ class ProductionController extends Controller
 
         return array_map(function (array $stage) use ($machinery) {
             if (! empty($stage['machine_id'])) {
+                if (empty($stage['machine_name']) || empty($stage['machine_code'])) {
+                    $machine = $machinery->firstWhere('id', (int) $stage['machine_id']);
+                    if ($machine !== null) {
+                        return $this->attachMachineToStage($stage, $machine);
+                    }
+                }
+
                 return $stage;
             }
 
@@ -887,6 +1103,7 @@ class ProductionController extends Controller
      */
     private function sortStages(array $stages): array
     {
+        $stages = array_values(array_filter($stages, 'is_array'));
         usort($stages, fn (array $left, array $right) => ((int) ($left['order'] ?? 0)) <=> ((int) ($right['order'] ?? 0)));
 
         return array_values($stages);
@@ -894,6 +1111,50 @@ class ProductionController extends Controller
 
     private function format(ProductionBatch $batch): array
     {
+        $isJobWorkStage = $this->detectJobWorkStage($batch);
+        $jobWorkFlowState = 'not_job_work';
+        try {
+            $jobWorkFlowState = $this->jobWorkFlow->flowState($batch);
+        } catch (\Throwable) {
+            $jobWorkFlowState = $isJobWorkStage ? 'ready_to_send' : 'not_job_work';
+        }
+        if ($isJobWorkStage && $jobWorkFlowState === 'not_job_work') {
+            $jobWorkFlowState = 'ready_to_send';
+        }
+
+        try {
+            $stages = $this->resolveStagesForBatch($batch);
+        } catch (\Throwable) {
+            $stages = [];
+        }
+
+        try {
+            $isLastStage = $this->isAtLastStage($batch);
+        } catch (\Throwable) {
+            $stageOrder = max(1, (int) ($batch->stage_order ?? 1));
+            $totalStages = max(1, (int) ($batch->total_stages ?? 1));
+            $isLastStage = $stageOrder >= $totalStages;
+        }
+
+        $workflowName = $batch->workflow?->name;
+        if (! filled($workflowName) && $batch->work_order_id) {
+            $workOrder = $batch->relationLoaded('workOrder')
+                ? $batch->workOrder
+                : WorkOrder::query()->find($batch->work_order_id);
+            if ($workOrder !== null) {
+                $workflowName = $workOrder->route_card_no
+                    ?: $workOrder->workflow_name
+                    ?: $workOrder->product;
+            }
+        }
+
+        $materialSpec = null;
+        try {
+            $materialSpec = $this->materialSpec->forBatch($batch);
+        } catch (\Throwable $e) {
+            report($e);
+        }
+
         return [
             'id' => $batch->id,
             'batch_number' => $batch->batch_number,
@@ -901,17 +1162,18 @@ class ProductionController extends Controller
             'product_name' => $batch->product_name,
             'quantity' => $batch->quantity,
             'workflow_id' => $batch->workflow_id,
-            'workflow' => $batch->workflow?->name,
+            'workflow' => $workflowName,
             'current_stage' => $batch->current_stage,
             'stage_order' => $batch->stage_order,
             'total_stages' => $batch->total_stages,
             'status' => $batch->status,
-            'started_at' => $batch->started_at?->format('Y-m-d H:i'),
-            'stage_started_at' => $batch->stage_started_at?->format('Y-m-d H:i'),
-            'completed_at' => $batch->completed_at?->format('Y-m-d H:i'),
-            'awaiting_final_completion_at' => $batch->awaiting_final_completion_at?->format('Y-m-d H:i'),
+            'priority' => $batch->priority ?? 'normal',
+            'started_at' => $this->safeDateTime($batch->started_at),
+            'stage_started_at' => $this->safeDateTime($batch->stage_started_at),
+            'completed_at' => $this->safeDateTime($batch->completed_at),
+            'awaiting_final_completion_at' => $this->safeDateTime($batch->awaiting_final_completion_at),
             'awaiting_final_completion' => $batch->awaiting_final_completion_at !== null,
-            'is_last_stage' => $this->isAtLastStage($batch),
+            'is_last_stage' => $isLastStage,
             'hold_reason' => $batch->hold_reason,
             'pr_number' => $batch->pr_number,
             'supplier' => $batch->supplier,
@@ -923,13 +1185,344 @@ class ProductionController extends Controller
             'user_name' => $batch->user_name,
             'checkin_id' => $batch->checkin_id,
             'work_order_id' => $batch->work_order_id,
-            'parent_batch_id' => $batch->parent_batch_id,
-            'stage_history' => $batch->stage_history ?? [],
-            'activity_log' => $batch->activity_log ?? [],
-            'job_work_flow_state' => $this->jobWorkFlow->flowState($batch),
-            'is_job_work_stage' => $this->jobWorkFlow->isBatchAtJobWorkStage($batch),
-            'stages' => $this->resolveStagesForBatch($batch),
+            'parent_batch_id' => Schema::hasColumn('production_batches', 'parent_batch_id')
+                ? $batch->parent_batch_id
+                : null,
+            'stage_history' => $this->safeJsonArray($batch->stage_history),
+            'activity_log' => $this->safeJsonArray($batch->activity_log),
+            'rejections' => $this->formatBatchRejections($batch),
+            'material_spec' => $materialSpec,
+            'job_work_flow_state' => $jobWorkFlowState,
+            'is_job_work_stage' => $isJobWorkStage,
+            'stages' => $stages,
         ];
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function formatBatchFallback(int $batchId): ?array
+    {
+        $row = DB::table('production_batches')->where('id', $batchId)->first();
+        if ($row === null) {
+            return null;
+        }
+
+        $workflowName = null;
+        if (! empty($row->workflow_id)) {
+            $workflowName = DB::table('workflows')->where('id', $row->workflow_id)->value('name');
+        }
+
+        $stageOrder = (int) ($row->stage_order ?? 1);
+        $totalStages = max(1, (int) ($row->total_stages ?? 1));
+        [$jobWorkFlowState, $isJobWorkStage] = $this->jobWorkFlagsForFallback($batchId, $row);
+
+        return [
+            'id' => (int) $row->id,
+            'batch_number' => (string) ($row->batch_number ?? ''),
+            'product' => (string) ($row->product_name ?? ''),
+            'product_name' => (string) ($row->product_name ?? ''),
+            'quantity' => (int) ($row->quantity ?? 0),
+            'workflow_id' => $row->workflow_id,
+            'workflow' => $workflowName,
+            'current_stage' => $row->current_stage,
+            'stage_order' => $stageOrder,
+            'total_stages' => $totalStages,
+            'status' => (string) ($row->status ?? 'in_progress'),
+            'priority' => (string) ($row->priority ?? 'normal'),
+            'started_at' => $this->safeDateTime($row->started_at ?? null),
+            'stage_started_at' => $this->safeDateTime($row->stage_started_at ?? null),
+            'completed_at' => $this->safeDateTime($row->completed_at ?? null),
+            'awaiting_final_completion_at' => $this->safeDateTime($row->awaiting_final_completion_at ?? null),
+            'awaiting_final_completion' => ! empty($row->awaiting_final_completion_at),
+            'is_last_stage' => $stageOrder >= $totalStages,
+            'hold_reason' => $row->hold_reason ?? null,
+            'pr_number' => $row->pr_number ?? null,
+            'supplier' => $row->supplier ?? null,
+            'vendor_name' => $row->vendor_name ?? null,
+            'client_name' => $row->client_name ?? null,
+            'unit' => $row->unit ?? null,
+            'source' => $row->source ?? null,
+            'performed_by' => $row->performed_by ?? null,
+            'user_name' => $row->user_name ?? null,
+            'checkin_id' => $row->checkin_id ?? null,
+            'work_order_id' => $row->work_order_id ?? null,
+            'parent_batch_id' => property_exists($row, 'parent_batch_id') ? $row->parent_batch_id : null,
+            'stage_history' => $this->safeJsonArray($row->stage_history ?? null),
+            'activity_log' => $this->safeJsonArray($row->activity_log ?? null),
+            'rejections' => ($batchModel = ProductionBatch::query()->find((int) $row->id))
+                ? $this->formatBatchRejections($batchModel)
+                : [],
+            'job_work_flow_state' => $jobWorkFlowState,
+            'is_job_work_stage' => $isJobWorkStage,
+            'stages' => [],
+        ];
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function formatBatchRejections(ProductionBatch $batch): array
+    {
+        $stages = $this->resolveStagesForBatch($batch);
+
+        return Rejection::query()
+            ->where('production_batch_id', $batch->id)
+            ->latest()
+            ->get()
+            ->map(fn (Rejection $rejection) => [
+                'id' => $rejection->id,
+                'item_code' => $rejection->item_code,
+                'stage' => $this->resolveRejectionDisplayStage($batch, $rejection, $stages),
+                'stage_order' => $rejection->stage_order,
+                'quantity' => $rejection->quantity,
+                'reason' => $rejection->reason,
+                'rework_status' => $rejection->rework_status,
+                'rework_assigned_to' => $rejection->rework_assigned_to,
+                'reported_by' => $rejection->reported_by,
+                'rejection_date' => $rejection->rejection_date?->format('Y-m-d'),
+                'created_at' => $rejection->created_at?->format('Y-m-d H:i'),
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $stages
+     */
+    private function resolveRejectionDisplayStage(
+        ProductionBatch $batch,
+        Rejection $rejection,
+        array $stages,
+    ): string {
+        $order = (int) ($rejection->stage_order ?? 0);
+        if ($order > 0 && isset($stages[$order - 1])) {
+            return $this->resolveStageDisplayLabel($stages[$order - 1]);
+        }
+
+        $stored = trim((string) ($rejection->stage ?? ''));
+        if ($stored !== '') {
+            foreach ($stages as $stage) {
+                if (strcasecmp($this->resolveStageDisplayLabel($stage), $stored) === 0) {
+                    return $stored;
+                }
+            }
+        }
+
+        $inferredOrder = $this->inferStageOrderAtTime(
+            $batch,
+            $rejection->created_at,
+            $stages,
+        );
+        if ($inferredOrder !== null && isset($stages[$inferredOrder - 1])) {
+            return $this->resolveStageDisplayLabel($stages[$inferredOrder - 1]);
+        }
+
+        if ($stored !== '') {
+            $storedLower = strtolower($stored);
+            $matches = array_values(array_filter(
+                $stages,
+                fn (array $stage) => strtolower(trim((string) ($stage['name'] ?? ''))) === $storedLower,
+            ));
+
+            if (count($matches) === 1) {
+                return $this->resolveStageDisplayLabel($matches[0]);
+            }
+
+            if (count($matches) > 1) {
+                $currentOrder = max(1, (int) $batch->stage_order);
+                if (isset($stages[$currentOrder - 1])) {
+                    $currentProcess = strtolower(trim((string) ($stages[$currentOrder - 1]['name'] ?? '')));
+                    if ($currentProcess === $storedLower) {
+                        return $this->resolveStageDisplayLabel($stages[$currentOrder - 1]);
+                    }
+                }
+            }
+        }
+
+        return $stored !== '' ? $stored : $this->resolveBatchStageDisplayLabel($batch);
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $stages
+     */
+    private function inferStageOrderAtTime(
+        ProductionBatch $batch,
+        ?\DateTimeInterface $at,
+        array $stages,
+    ): ?int {
+        if ($at === null) {
+            return null;
+        }
+
+        $history = $batch->stage_history ?? [];
+        if (! is_array($history) || $history === []) {
+            return null;
+        }
+
+        $rejectedAt = \Carbon\Carbon::parse($at);
+        $activeProcess = null;
+        $targetOccurrence = 0;
+
+        foreach ($history as $entry) {
+            if (! is_array($entry)) {
+                continue;
+            }
+
+            $processName = trim((string) ($entry['stage'] ?? ''));
+            if ($processName === '') {
+                continue;
+            }
+
+            $started = $this->parseActivityTime($entry['started'] ?? $entry['started_at'] ?? null);
+            if ($started === null || $rejectedAt->lt($started)) {
+                continue;
+            }
+
+            $completedRaw = $entry['completed'] ?? $entry['completed_at'] ?? null;
+            $completed = $this->parseActivityTime($completedRaw);
+            $isOpen = $completedRaw === null
+                || (is_string($completedRaw) && trim($completedRaw) === '')
+                || ($completed !== null && $rejectedAt->lte($completed));
+
+            if (! $isOpen) {
+                continue;
+            }
+
+            $activeProcess = $processName;
+            $targetOccurrence = 0;
+            foreach ($history as $prior) {
+                if (! is_array($prior)) {
+                    continue;
+                }
+                if (strcasecmp(trim((string) ($prior['stage'] ?? '')), $activeProcess) === 0) {
+                    $targetOccurrence++;
+                }
+                if ($prior === $entry) {
+                    break;
+                }
+            }
+            break;
+        }
+
+        if ($activeProcess === null || $targetOccurrence < 1) {
+            return null;
+        }
+
+        $seen = 0;
+        foreach ($stages as $index => $stage) {
+            if (strcasecmp(trim((string) ($stage['name'] ?? '')), $activeProcess) !== 0) {
+                continue;
+            }
+            $seen++;
+            if ($seen === $targetOccurrence) {
+                return $index + 1;
+            }
+        }
+
+        return null;
+    }
+
+    private function parseActivityTime(mixed $value): ?\Carbon\Carbon
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        if ($value instanceof \DateTimeInterface) {
+            return \Carbon\Carbon::parse($value);
+        }
+
+        $raw = trim((string) $value);
+        if ($raw === '') {
+            return null;
+        }
+
+        try {
+            return \Carbon\Carbon::parse($raw);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private function detectJobWorkStage(ProductionBatch $batch): bool
+    {
+        try {
+            if ($this->jobWorkFlow->isBatchAtJobWorkStage($batch)) {
+                return true;
+            }
+        } catch (\Throwable) {
+            // Fall through to the stage-name check.
+        }
+
+        $currentName = strtolower(trim((string) ($batch->current_stage ?? '')));
+
+        return $currentName === 'job work' || str_contains($currentName, 'job work');
+    }
+
+    /**
+     * @return array{0: string, 1: bool}
+     */
+    private function jobWorkFlagsForFallback(int $batchId, object $row): array
+    {
+        try {
+            $model = ProductionBatch::query()->find($batchId);
+            if ($model !== null) {
+                $isJobWorkStage = $this->detectJobWorkStage($model);
+                $flowState = $this->jobWorkFlow->flowState($model);
+                if ($isJobWorkStage && $flowState === 'not_job_work') {
+                    $flowState = 'ready_to_send';
+                }
+
+                return [$flowState, $isJobWorkStage];
+            }
+        } catch (\Throwable) {
+            // Use current_stage from the raw row.
+        }
+
+        $currentName = strtolower(trim((string) ($row->current_stage ?? '')));
+        $isJobWorkStage = $currentName === 'job work' || str_contains($currentName, 'job work');
+
+        return [$isJobWorkStage ? 'ready_to_send' : 'not_job_work', $isJobWorkStage];
+    }
+
+    private function safeDateTime(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        try {
+            if ($value instanceof \DateTimeInterface) {
+                return $value->format('Y-m-d H:i');
+            }
+
+            return \Carbon\Carbon::parse((string) $value)->format('Y-m-d H:i');
+        } catch (\Throwable) {
+            return is_string($value) && $value !== '' ? $value : null;
+        }
+    }
+
+    /**
+     * @return array<int, mixed>
+     */
+    private function safeJsonArray(mixed $value): array
+    {
+        if (is_array($value)) {
+            return $value;
+        }
+
+        if (! is_string($value) || trim($value) === '') {
+            return [];
+        }
+
+        try {
+            $decoded = json_decode($value, true, 512, JSON_THROW_ON_ERROR);
+
+            return is_array($decoded) ? $decoded : [];
+        } catch (\Throwable) {
+            return [];
+        }
     }
 
     private function formatMaterialRequest(BatchMaterialRequest $request, bool $includeBatch = false): array

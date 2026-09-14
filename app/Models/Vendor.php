@@ -11,6 +11,7 @@ class Vendor extends Model
         'contact_person',
         'email',
         'phone',
+        'gst_number',
         'address',
         'city',
         'status',
