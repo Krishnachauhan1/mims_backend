@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
 # Hostinger backend deploy — GitHub Actions + local Mac.
 #
-# GitHub: .github/workflows/deploy.yml calls: sync, then SSH postdeploy on server.
+# GitHub: .github/workflows/deploy.yml calls: sync, then postdeploy on server.
+# Upload uses tar over SSH (Hostinger often has no rsync on SSH → rsync exit 255).
 #
 # Local (SSH key):
 #   export SSH_HOST=145.79.58.104 SSH_USERNAME=u683672103 SSH_PORT=65002
 #   export REMOTE_DIR=domains/powerforceindustries.com/public_html
 #   export RSYNC_RSH="ssh -p $SSH_PORT -i ~/.ssh/mims_github_deploy"
-#   ./deploy/ci-hostinger.sh full
-#
-# Local (password — needs sshpass: brew install hudochenkov/sshpass/sshpass):
-#   export SSHPASS='your-ssh-password'
-#   export SSH_HOST=... SSH_USERNAME=... SSH_PORT=65002
 #   ./deploy/ci-hostinger.sh full
 set -euo pipefail
 
@@ -23,62 +19,108 @@ SSH_USERNAME="${SSH_USERNAME:-u683672103}"
 SSH_PORT="${SSH_PORT:-65002}"
 REMOTE_DIR="${REMOTE_DIR:-domains/powerforceindustries.com/public_html}"
 
-resolve_rsync_rsh() {
+if [ "$SSH_PORT" = "21" ]; then
+  echo "==> SSH_PORT was 21 (FTP). Using Hostinger SSH port 65002." >&2
+  SSH_PORT="65002"
+fi
+
+resolve_ssh() {
   if [ -n "${RSYNC_RSH:-}" ]; then
     return
   fi
   if [ -f "${HOME}/.ssh/id_deploy" ]; then
-    RSYNC_RSH="ssh -i ${HOME}/.ssh/id_deploy -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new"
+    RSYNC_RSH="ssh -i ${HOME}/.ssh/id_deploy -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -o IdentitiesOnly=yes"
   elif [ -n "${SSHPASS:-}" ]; then
     if ! command -v sshpass >/dev/null 2>&1; then
       echo "Install sshpass for password SSH, or set RSYNC_RSH / deploy key." >&2
       exit 1
     fi
-    RSYNC_RSH="sshpass -e ssh -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new"
+    RSYNC_RSH="sshpass -e ssh -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -o PreferredAuthentications=password -o PubkeyAuthentication=no"
   elif [ -n "${SSH_IDENTITY_FILE:-}" ] && [ -f "${SSH_IDENTITY_FILE}" ]; then
-    RSYNC_RSH="ssh -i ${SSH_IDENTITY_FILE} -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new"
+    RSYNC_RSH="ssh -i ${SSH_IDENTITY_FILE} -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30"
   else
-    RSYNC_RSH="ssh -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new"
+    RSYNC_RSH="ssh -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30"
   fi
   export RSYNC_RSH
 }
 
 ssh_cmd() {
-  resolve_rsync_rsh
+  resolve_ssh
   # shellcheck disable=SC2086
   $RSYNC_RSH "${SSH_USERNAME}@${SSH_HOST}" "$@"
 }
 
-REMOTE="${SSH_USERNAME}@${SSH_HOST}:~/${REMOTE_DIR}/"
+preflight_ssh() {
+  echo "==> SSH test ${SSH_USERNAME}@${SSH_HOST}:${SSH_PORT}"
+  if ! ssh_cmd "echo ssh-ok"; then
+    echo "" >&2
+    echo "SSH login failed from this machine." >&2
+    echo "GitHub Actions: use secret SSH_PRIVATE_KEY (deploy key on server), not FTP password." >&2
+    echo "Or set SSH_PASSWORD to the same password as: ssh -p 65002 ${SSH_USERNAME}@${SSH_HOST}" >&2
+    exit 1
+  fi
+}
 
-RSYNC_EXCLUDES=(
-  --exclude '.git'
-  --exclude '.github'
-  --exclude 'vendor'
-  --exclude 'node_modules'
-  --exclude '.env'
-  --exclude '.env.*'
-  --exclude 'storage/logs/*'
-  --exclude 'storage/framework/cache/data/*'
-  --exclude 'storage/framework/sessions/*'
-  --exclude 'storage/framework/views/*'
-  --exclude '.DS_Store'
-  --exclude 'public/hot'
-  --exclude 'bootstrap/cache/*.php'
+TAR_EXCLUDES=(
+  --exclude='./.git'
+  --exclude='./.github'
+  --exclude='./vendor'
+  --exclude='./node_modules'
+  --exclude='./.env'
+  --exclude='./.env.*'
+  --exclude='./storage/logs'
+  --exclude='./storage/framework/cache/data'
+  --exclude='./storage/framework/sessions'
+  --exclude='./storage/framework/views'
+  --exclude='./.DS_Store'
+  --exclude='./public/hot'
+  --exclude='./bootstrap/cache/packages.php'
+  --exclude='./bootstrap/cache/services.php'
+  --exclude='./bootstrap/cache/config.php'
 )
 
-do_sync() {
-  resolve_rsync_rsh
-  echo "==> Rsync to ${REMOTE}"
+do_sync_tar() {
+  echo "==> Upload (tar+ssh) → ~/${REMOTE_DIR}/"
+  tar -czf - "${TAR_EXCLUDES[@]}" -C "$ROOT" . | ssh_cmd "mkdir -p ~/${REMOTE_DIR} && cd ~/${REMOTE_DIR} && tar -xzf -"
+}
+
+do_sync_rsync() {
+  REMOTE="${SSH_USERNAME}@${SSH_HOST}:~/${REMOTE_DIR}/"
+  RSYNC_EXCLUDES=(
+    --exclude '.git'
+    --exclude '.github'
+    --exclude 'vendor'
+    --exclude 'node_modules'
+    --exclude '.env'
+    --exclude '.env.*'
+    --exclude 'storage/logs/*'
+    --exclude 'storage/framework/cache/data/*'
+    --exclude 'storage/framework/sessions/*'
+    --exclude 'storage/framework/views/*'
+    --exclude '.DS_Store'
+    --exclude 'public/hot'
+    --exclude 'bootstrap/cache/*.php'
+  )
+  echo "==> Rsync → ${REMOTE}"
   rsync -avz -e "$RSYNC_RSH" "${RSYNC_EXCLUDES[@]}" "$ROOT/" "$REMOTE"
 }
 
+do_sync() {
+  resolve_ssh
+  preflight_ssh
+  if [ "${DEPLOY_SYNC:-tar}" = "rsync" ]; then
+    do_sync_rsync
+  else
+    do_sync_tar
+  fi
+}
+
 do_postdeploy() {
+  preflight_ssh
   echo "==> Composer, migrate, cache on server..."
   ssh_cmd bash -s <<ENDSSH
 set -e
 cd ~/${REMOTE_DIR}
-# Never use Mac/dev bootstrap cache on production (Pail, Pao, etc.).
 rm -f bootstrap/cache/packages.php bootstrap/cache/services.php bootstrap/cache/config.php
 if command -v composer >/dev/null 2>&1; then
   composer install --no-dev --optimize-autoloader --no-interaction --no-scripts

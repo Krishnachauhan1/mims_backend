@@ -97,6 +97,11 @@ jobs:
           HOST="${HOST#https://}"
           USER="${SSH_USERNAME:-$FTP_USERNAME}"
           PASS="${SSH_PASSWORD:-$FTP_PASSWORD}"
+          SSH_PORT="${SSH_PORT:-65002}"
+          if [ "$SSH_PORT" = "21" ]; then
+            echo "::warning::SSH_PORT was 21 (FTP). Using Hostinger SSH port 65002."
+            SSH_PORT="65002"
+          fi
 
           if [ -z "$HOST" ] || [ -z "$USER" ]; then
             echo "::error::Set SSH_HOST + SSH_USERNAME (or FTP_SERVER + FTP_USERNAME)."
@@ -106,6 +111,7 @@ jobs:
           echo "DEPLOY_HOST=$HOST" >> "$GITHUB_ENV"
           echo "DEPLOY_USER=$USER" >> "$GITHUB_ENV"
           echo "DEPLOY_PORT=$SSH_PORT" >> "$GITHUB_ENV"
+          echo "DEPLOY_SYNC=tar" >> "$GITHUB_ENV"
 
           ssh-keyscan -p "$SSH_PORT" "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
 
@@ -126,12 +132,13 @@ jobs:
             exit 1
           fi
 
-      - name: Rsync application (no vendor / .env)
+      - name: Upload application (tar+ssh, no vendor / .env)
         env:
           SSH_HOST: ${{ env.DEPLOY_HOST }}
           SSH_USERNAME: ${{ env.DEPLOY_USER }}
           SSH_PORT: ${{ env.DEPLOY_PORT }}
           REMOTE_DIR: ${{ secrets.SSH_REMOTE_DIR || env.SSH_REMOTE_DIR }}
+          DEPLOY_SYNC: ${{ env.DEPLOY_SYNC }}
           RSYNC_RSH: ${{ env.DEPLOY_RSYNC_RSH }}
           SSHPASS: ${{ env.DEPLOY_SSHPASS }}
         run: bash deploy/ci-hostinger.sh sync
