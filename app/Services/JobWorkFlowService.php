@@ -83,6 +83,14 @@ class JobWorkFlowService
             return 'not_job_work';
         }
 
+        return $this->flowStateFromTransactions($batch);
+    }
+
+    /**
+     * Job-work movement state from checkout/checkin rows (ignores stage-name guards).
+     */
+    public function flowStateFromTransactions(ProductionBatch $batch): string
+    {
         if (! $this->schemaReady()) {
             return 'ready_to_send';
         }
@@ -118,6 +126,15 @@ class JobWorkFlowService
             : 'awaiting_checkin';
     }
 
+    public function displayFlowState(ProductionBatch $batch, bool $isJobWorkStage): string
+    {
+        if (! $isJobWorkStage) {
+            return 'not_job_work';
+        }
+
+        return $this->flowStateFromTransactions($batch);
+    }
+
     private function jobWorkVisitIndex(ProductionBatch $batch): int
     {
         $stages = $this->resolveStagesForBatch($batch);
@@ -145,12 +162,21 @@ class JobWorkFlowService
             throw new HttpException(422, 'Batch is not at a Job Work stage');
         }
 
-        if ($this->flowState($batch) !== 'ready_to_send') {
+        if ($this->flowStateFromTransactions($batch) !== 'ready_to_send') {
             throw new HttpException(422, 'Batch has already been sent for job work');
         }
 
         $result = DB::transaction(function () use ($batch, $user) {
             $batch = ProductionBatch::query()->lockForUpdate()->findOrFail($batch->id);
+
+            if (! $this->isBatchAtJobWorkStage($batch)) {
+                throw new HttpException(422, 'Batch is not at a Job Work stage');
+            }
+
+            if ($this->flowStateFromTransactions($batch) !== 'ready_to_send') {
+                throw new HttpException(422, 'Batch has already been sent for job work');
+            }
+
             $jobWork = $this->resolveJobWork($batch);
             $vendor = $this->vendorForCurrentStage($batch, $jobWork);
 

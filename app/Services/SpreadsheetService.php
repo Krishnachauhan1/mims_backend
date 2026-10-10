@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use Illuminate\Support\Carbon;
 use Illuminate\Http\UploadedFile;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
@@ -174,7 +175,7 @@ class SpreadsheetService
 
     public function usesExcelFormat(string $entity): bool
     {
-        return $entity === 'machinery';
+        return in_array($entity, ['machinery', 'gauges'], true);
     }
 
     public function downloadFilename(string $entity, string $kind): string
@@ -263,8 +264,42 @@ class SpreadsheetService
                     '500 units/day', 'Haas Automation', 'active', 'Raw Material', '',
                 ],
             ],
+            'gauges' => [
+                'headers' => [
+                    'sl_no', 'instrument_name', 'ident_no', 'certificate_no', 'location',
+                    'make', 'range', 'least_count_range', 'cal_agency', 'cal_freq',
+                    'cal_date', 'trigger_date', 'cal_due_date', 'cal_status',
+                ],
+                'sample' => [
+                    '1', 'Thread Plug Gauge M16X2', 'PFI/TPG/01', 'AM26CC04276', 'STD ROOM',
+                    'SAMARTH', 'M16X2 - 6H', '0.01 mm', 'ACCRATE MEASURMENT', '1 YEAR',
+                    '03/08/2026', '28/07/2027', '02/08/2027', 'VALID',
+                ],
+            ],
+            'finished-goods' => $this->finishedGoodsTemplateDefinition(),
             default => throw new \InvalidArgumentException("Unknown entity: {$entity}"),
         };
+    }
+
+    /**
+     * @return array{headers: list<string>, sample: list<string>}
+     */
+    private function finishedGoodsTemplateDefinition(): array
+    {
+        $today = Carbon::now()->format('d/m/Y');
+
+        return [
+            'headers' => [
+                'product', 'sku', 'batch_number', 'quantity', 'stock', 'dispatched',
+                'unit', 'location', 'warehouse', 'status', 'quality_status',
+                'production_date', 'pr_number', 'workflow',
+            ],
+            'sample' => [
+                'PIN M16', '', '', '100', '', '',
+                'pcs', '', '', 'In Stock', '',
+                $today, '', '',
+            ],
+        ];
     }
 
     /**
@@ -276,7 +311,7 @@ class SpreadsheetService
         return array_map(function (string $header): string {
             $header = $this->stripBom(trim($header));
             $header = strtolower($header);
-            $header = preg_replace('/[\s\-]+/', '_', $header) ?? $header;
+            $header = preg_replace('/[\s\-\.\/]+/', '_', $header) ?? $header;
 
             return trim($header, '_');
         }, $rawHeaders);
@@ -335,6 +370,14 @@ class SpreadsheetService
         }
 
         if (isset($set['machine_code']) && isset($set['name'])) {
+            return true;
+        }
+
+        if (isset($set['instrument_name']) && isset($set['ident_no'])) {
+            return true;
+        }
+
+        if (isset($set['batch_number']) && (isset($set['product']) || isset($set['product_name']))) {
             return true;
         }
 

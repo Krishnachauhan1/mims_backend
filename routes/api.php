@@ -16,6 +16,7 @@
     use App\Http\Controllers\Api\GaugeController;
     use App\Http\Controllers\Api\FinishedGoodController;
     use App\Http\Controllers\Api\ItemController;
+    use App\Http\Controllers\Api\MaterialRequisitionController;
     use App\Http\Controllers\Api\MachineryController;
     use App\Http\Controllers\Api\MachineTimeController;
     use App\Http\Controllers\Api\NotificationController;
@@ -130,6 +131,12 @@
         Route::put('/checkin/{transaction}', [CheckinController::class, 'update']);
         Route::post('/checkout', [CheckinController::class, 'checkout']);
 
+        Route::get('/material-requisitions', [MaterialRequisitionController::class, 'index']);
+        Route::post('/material-requisitions', [MaterialRequisitionController::class, 'store']);
+        Route::post('/material-requisitions/assign', [MaterialRequisitionController::class, 'assign']);
+        Route::put('/material-requisitions/{materialRequisition}/issue', [MaterialRequisitionController::class, 'issue']);
+        Route::put('/material-requisitions/{materialRequisition}/reject', [MaterialRequisitionController::class, 'reject']);
+
         Route::get('/inventory', [InventoryController::class, 'index']);
         Route::post('/inventory', [InventoryController::class, 'store']);
         Route::put('/inventory/{inventory}', [InventoryController::class, 'update']);
@@ -143,6 +150,7 @@
         Route::post('/machinery/{machinery}/maintenance-logs', [MaintenanceLogController::class, 'store']);
 
         Route::get('/documents', [DocumentController::class, 'index']);
+        Route::post('/documents/from-base64', [DocumentController::class, 'storeFromBase64']);
         Route::post('/documents', [DocumentController::class, 'store']);
         Route::get('/documents/{document}/download', [DocumentController::class, 'download']);
         Route::delete('/documents/{document}', [DocumentController::class, 'destroy']);
@@ -155,6 +163,8 @@
         Route::put('/gauges/{gauge}/maintenance', [GaugeController::class, 'updateMaintenance']);
         Route::post('/gauges/{gauge}/calibrations', [GaugeController::class, 'storeCalibration']);
         Route::post('/gauges/{gauge}/calibrations/{calibration}/certificate', [GaugeController::class, 'attachCalibrationCertificate']);
+        Route::post('/gauges/{gauge}/calibrations/{calibration}/document', [GaugeController::class, 'linkCalibrationDocument']);
+        Route::post('/gauges/{gauge}/calibrations/{calibration}/certificate/clear', [GaugeController::class, 'clearCalibrationCertificate']);
 
         Route::get('/machine-times', [MachineTimeController::class, 'index']);
         Route::put('/machine-times', [MachineTimeController::class, 'upsert']);
@@ -213,6 +223,8 @@
 
         Route::get('/production/batches', [ProductionController::class, 'batches']);
         Route::post('/production/batches', [ProductionController::class, 'store']);
+        Route::delete('/production/batches/{batch}', [ProductionController::class, 'destroyBatch']);
+        Route::post('/production/batches/{batch}/delete', [ProductionController::class, 'destroyBatch']);
         Route::put('/production/batches/{batch}/status', [ProductionController::class, 'updateStatus']);
         Route::put('/production/batches/{batch}/priority', [ProductionController::class, 'updatePriority']);
         Route::post('/production/advance-stage', [ProductionController::class, 'advanceStage']);

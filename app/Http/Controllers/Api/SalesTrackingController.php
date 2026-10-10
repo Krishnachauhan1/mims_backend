@@ -25,18 +25,8 @@ class SalesTrackingController extends Controller
 
     public function summary(Request $request): JsonResponse
     {
-        $inventoryByProduct = InventoryItem::query()
-            ->where('type', 'finished_goods')
-            ->where('status', 'available')
-            ->get()
-            ->groupBy(fn (InventoryItem $item) => $this->canonicalProductKey($item->name))
-            ->map(function ($items) {
-                return [
-                    'available_qty' => (int) $items->sum('quantity'),
-                    'min_stock' => (int) $items->max('min_stock'),
-                    'unit' => $items->first()->unit ?? 'pcs',
-                ];
-            });
+        $inventoryByProduct = $this->availableInventoryByProductKey();
+        $finishedGoodsStockByProduct = $this->sellableFinishedGoodsStockByProductKey();
 
         $catalog = $this->manufacturedProductCatalog();
         $rawMaterialKeys = $this->rawMaterialProductKeys();
@@ -44,12 +34,18 @@ class SalesTrackingController extends Controller
 
         $keys = collect($catalog->keys())
             ->merge($inventoryByProduct->keys())
+            ->merge($finishedGoodsStockByProduct->keys())
             ->merge($openOrderLines->keys())
             ->unique()
             ->reject(fn (string $key) => $this->isRawMaterialCatalogKey($key, $rawMaterialKeys))
             ->values();
 
-        $rows = $keys->map(function (string $key) use ($catalog, $inventoryByProduct, $openOrderLines) {
+        $rows = $keys->map(function (string $key) use (
+            $catalog,
+            $inventoryByProduct,
+            $finishedGoodsStockByProduct,
+            $openOrderLines,
+        ) {
             $catalogRow = $catalog->get($key, []);
             $inventory = $inventoryByProduct->get($key, [
                 'available_qty' => 0,
@@ -63,7 +59,10 @@ class SalesTrackingController extends Controller
 
                 return max(0, (int) $line['quantity'] - (int) ($line['fulfilled_qty'] ?? 0));
             });
-            $availableQty = (int) ($inventory['available_qty'] ?? 0);
+            $availableQty = max(
+                (int) ($inventory['available_qty'] ?? 0),
+                (int) ($finishedGoodsStockByProduct->get($key, 0)),
+            );
             $minStock = (int) ($inventory['min_stock'] ?? 0);
             $shortfall = max(0, $orderedQty - $availableQty);
             $isLow = $availableQty <= $minStock && $minStock > 0;
@@ -101,7 +100,15 @@ class SalesTrackingController extends Controller
                     ->values(),
                 'product' => $catalogRow,
             ];
-        })->sortBy('product_name')->values();
+        })->sortBy(function (array $row) {
+            $qty = (int) ($row['available_qty'] ?? 0);
+
+            return [
+                $qty > 0 ? 0 : 1,
+                -$qty,
+                strtolower((string) ($row['product_name'] ?? '')),
+            ];
+        })->values();
 
         $stats = [
             'total_products' => $rows->count(),
@@ -117,7 +124,14 @@ class SalesTrackingController extends Controller
         if ($request->filled('search')) {
             $term = strtolower(trim($request->string('search')->toString()));
             $filtered = $filtered
-                ->filter(fn (array $row) => str_contains(strtolower($row['product_name']), $term))
+                ->filter(function (array $row) use ($term) {
+                    $haystack = strtolower(implode(' ', array_filter([
+                        $row['product_name'] ?? '',
+                        $row['item_code'] ?? '',
+                    ])));
+
+                    return str_contains($haystack, $term);
+                })
                 ->values();
         }
 
@@ -378,8 +392,15 @@ class SalesTrackingController extends Controller
             ->get();
 
         foreach ($finished as $fg) {
-            $key = $this->canonicalProductKey($fg->product_name);
-            if ($key === '' || isset($byProduct[$key]) || $this->isRawMaterialCatalogKey($key, $rawMaterialKeys)) {
+            $masterItem = $this->resolveItemByNameOrCode($fg->product_name);
+            $key = $this->canonicalProductKey($fg->product_name, $masterItem?->id);
+            if ($key === '' || $this->isRawMaterialCatalogKey($key, $rawMaterialKeys)) {
+                continue;
+            }
+
+            if (isset($byProduct[$key])) {
+                $this->mergeCatalogItemMetadata($byProduct[$key], $masterItem, $fg->product_name);
+
                 continue;
             }
 
@@ -394,11 +415,14 @@ class SalesTrackingController extends Controller
                 }
             }
 
+            $displayName = $this->sellableDisplayName($masterItem, $fg->product_name);
+
             $byProduct[$key] = [
-                'name' => $fg->product_name,
-                'product' => $fg->product_name,
+                'name' => $displayName,
+                'product' => $displayName,
                 'unit' => $fg->unit ?? 'pcs',
-                'item_id' => null,
+                'item_id' => $masterItem?->id,
+                'item_code' => $masterItem?->code,
                 'client_id' => $fg->client_id,
                 'workflow_id' => $workflowId,
                 'workflow_name' => $workflowName,
@@ -410,20 +434,31 @@ class SalesTrackingController extends Controller
         $items = Item::query()
             ->where('status', 'active')
             ->where(function ($query) {
-                $query->where('category', 'product')
-                    ->orWhere('category', 'finished_goods')
-                    ->orWhere('category', 'finished goods');
+                $query->whereRaw('LOWER(TRIM(category)) IN (?, ?, ?)', [
+                    'product',
+                    'finished_goods',
+                    'finished goods',
+                ])->orWhereNull('category')
+                    ->orWhereRaw("TRIM(category) = ''");
             })
             ->get();
 
         foreach ($items as $item) {
             $key = $this->canonicalProductKey($item->name, $item->id);
-            if ($key === '' || isset($byProduct[$key]) || $this->isRawMaterialCatalogKey($key, $rawMaterialKeys)) {
+            if ($key === '' || $this->isRawMaterialCatalogKey($key, $rawMaterialKeys)) {
                 continue;
             }
+
+            if (isset($byProduct[$key])) {
+                $this->mergeCatalogItemMetadata($byProduct[$key], $item, $item->name);
+
+                continue;
+            }
+
+            $displayName = $this->sellableDisplayName($item, $item->name);
             $byProduct[$key] = [
-                'name' => $item->name,
-                'product' => $item->name,
+                'name' => $displayName,
+                'product' => $displayName,
                 'item_id' => $item->id,
                 'item_code' => $item->code,
                 'unit' => $item->unit ?? 'pcs',
@@ -476,11 +511,16 @@ class SalesTrackingController extends Controller
             $stages = $workflow?->stages ?? [];
         }
 
+        $masterItem = $order->item_id
+            ? Item::query()->find($order->item_id)
+            : $this->resolveItemByNameOrCode($order->product, $order->item_id);
+        $displayName = $this->sellableDisplayName($masterItem, $order->product);
+
         return [
-            'name' => $order->product,
-            'product' => $order->product,
-            'item_id' => $order->item_id,
-            'item_code' => $order->item_code,
+            'name' => $displayName,
+            'product' => $displayName,
+            'item_id' => $order->item_id ?: $masterItem?->id,
+            'item_code' => $order->item_code ?: $masterItem?->code,
             'unit' => $order->unit ?? 'pcs',
             'client_id' => $order->client_id,
             'workflow_id' => $order->workflow_id,
@@ -1139,6 +1179,85 @@ class SalesTrackingController extends Controller
                 }
             })
             ->first();
+    }
+
+    /**
+     * @return \Illuminate\Support\Collection<string, array{available_qty: int, min_stock: int, unit: string}>
+     */
+    private function availableInventoryByProductKey()
+    {
+        return InventoryItem::query()
+            ->where('type', 'finished_goods')
+            ->where('status', 'available')
+            ->get()
+            ->groupBy(function (InventoryItem $item) {
+                $master = $this->resolveItemByNameOrCode($item->name);
+
+                return $this->canonicalProductKey($item->name, $master?->id);
+            })
+            ->map(function ($items) {
+                return [
+                    'available_qty' => (int) $items->sum('quantity'),
+                    'min_stock' => (int) $items->max('min_stock'),
+                    'unit' => $items->first()->unit ?? 'pcs',
+                ];
+            });
+    }
+
+    /**
+     * @return \Illuminate\Support\Collection<string, int>
+     */
+    private function sellableFinishedGoodsStockByProductKey()
+    {
+        return FinishedGood::query()
+            ->where('stock', '>', 0)
+            ->get()
+            ->groupBy(function (FinishedGood $good) {
+                $master = $this->resolveItemByNameOrCode($good->product_name);
+
+                return $this->canonicalProductKey($good->product_name, $master?->id);
+            })
+            ->map(fn ($rows) => (int) $rows->sum('stock'));
+    }
+
+    private function sellableDisplayName(?Item $item, ?string $fallback): string
+    {
+        if ($item !== null) {
+            $code = trim((string) ($item->code ?? ''));
+            $name = trim((string) ($item->name ?? ''));
+            if ($code !== '' && $name !== '' && strcasecmp($code, $name) !== 0) {
+                return $code.' — '.$name;
+            }
+            if ($name !== '') {
+                return $name;
+            }
+            if ($code !== '') {
+                return $code;
+            }
+        }
+
+        return trim((string) $fallback) !== '' ? trim((string) $fallback) : 'Product';
+    }
+
+    /**
+     * @param  array<string, mixed>  $catalogRow
+     */
+    private function mergeCatalogItemMetadata(array &$catalogRow, ?Item $item, ?string $fallbackName): void
+    {
+        if ($item === null) {
+            return;
+        }
+
+        if (empty($catalogRow['item_id'])) {
+            $catalogRow['item_id'] = $item->id;
+        }
+        if (empty($catalogRow['item_code'])) {
+            $catalogRow['item_code'] = $item->code;
+        }
+
+        $displayName = $this->sellableDisplayName($item, $fallbackName);
+        $catalogRow['name'] = $displayName;
+        $catalogRow['product'] = $displayName;
     }
 
     private function canonicalProductKey(?string $name, ?int $itemId = null): string

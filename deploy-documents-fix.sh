@@ -7,10 +7,16 @@ SSH_PORT="65002"
 REMOTE="domains/powerforceindustries.com/public_html"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
-echo "==> Uploading DocumentController..."
+echo "==> Uploading DocumentController + routes (incl. /documents/from-base64)..."
 scp -P "$SSH_PORT" \
   "$ROOT/app/Http/Controllers/Api/DocumentController.php" \
   "$SSH_HOST:~/$REMOTE/app/Http/Controllers/Api/DocumentController.php"
+scp -P "$SSH_PORT" \
+  "$ROOT/routes/api.php" \
+  "$SSH_HOST:~/$REMOTE/routes/api.php"
+scp -P "$SSH_PORT" \
+  "$ROOT/app/Http/Controllers/Api/GaugeController.php" \
+  "$SSH_HOST:~/$REMOTE/app/Http/Controllers/Api/GaugeController.php"
 
 echo "==> Uploading documents migration (if missing on server)..."
 scp -P "$SSH_PORT" \

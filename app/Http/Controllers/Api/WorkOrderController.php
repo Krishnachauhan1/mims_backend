@@ -13,10 +13,12 @@ use App\Models\Workflow;
 use App\Services\AppNotificationService;
 use App\Services\MaterialSpecResolver;
 use App\Services\TaskMaterialService;
+use App\Support\DisplayValue;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\Response;
 
 class WorkOrderController extends Controller
@@ -164,6 +166,7 @@ class WorkOrderController extends Controller
         $materials = $validated['materials'] ?? [];
         unset($validated['materials']);
 
+        $validated = $this->enforceItemCodeForRouteCard($validated);
         $validated = $this->hydrateWorkOrderStages($validated);
 
         $order = WorkOrder::create($validated);
@@ -199,6 +202,7 @@ class WorkOrderController extends Controller
         $nextStatus = $validated['supervisor_status'] ?? 'draft';
         $validated['supervisor_status'] = $nextStatus === 'pending' ? 'pending' : 'draft';
 
+        $validated = $this->enforceItemCodeForRouteCard($validated);
         $validated = $this->hydrateWorkOrderStages($validated);
 
         $workOrder->update($validated);
@@ -222,17 +226,26 @@ class WorkOrderController extends Controller
 
     public function updateRoute(Request $request, WorkOrder $workOrder): JsonResponse
     {
-        if (! in_array($workOrder->supervisor_status, ['draft', 'pending', 'wip'], true)) {
+        if (! in_array($workOrder->supervisor_status, ['draft', 'pending', 'wip', 'rejection'], true)) {
             return response()->json(
-                ['message' => 'Only draft, pending, or WIP route cards can be edited'],
+                ['message' => 'This route card cannot be edited in its current status'],
                 422,
             );
         }
 
         $validated = $request->validate([
             'workflow_id' => 'nullable|integer',
+            'workflow_name' => 'nullable|string|max:255',
+            'client_id' => 'nullable|integer',
+            'client_name' => 'nullable|string|max:255',
+            'item_id' => 'nullable|integer|exists:items,id',
+            'product' => 'nullable|string|max:255',
+            'item_code' => 'nullable|string|max:255',
+            'unit' => 'nullable|string|max:50',
+            'route_card_no' => 'nullable|string|max:255',
             'quantity' => 'nullable|integer|min:1',
             'remarks' => 'nullable|string|max:2000',
+            'priority' => 'nullable|string|in:normal,urgent',
             'updated_by' => 'nullable|string|max:255',
             'stages' => 'required|array|min:1',
             'stages.*.name' => 'nullable|string|max:255',
@@ -261,6 +274,21 @@ class WorkOrderController extends Controller
         $materials = $validated['materials'] ?? [];
         unset($validated['materials'], $validated['stages']);
 
+        if (array_key_exists('route_card_no', $validated) && blank($validated['route_card_no'])) {
+            unset($validated['route_card_no']);
+        }
+
+        $itemFields = array_intersect_key($validated, array_flip([
+            'item_id', 'item_code', 'product',
+        ]));
+        if ($itemFields !== []) {
+            $validated = $this->fillAndRequireItemCode(array_merge([
+                'item_id' => $workOrder->item_id,
+                'item_code' => $workOrder->item_code,
+                'product' => $workOrder->product,
+            ], $validated));
+        }
+
         $workOrder->update([
             ...$validated,
             'stages' => $stages,
@@ -268,6 +296,36 @@ class WorkOrderController extends Controller
                 fn (array $stage) => (bool) ($stage['is_job_work'] ?? false),
             ),
         ]);
+
+        if ($itemFields !== []) {
+            $workOrder->refresh();
+            $resolvedCode = $this->resolveItemCodeForWorkOrder($workOrder);
+            if ($resolvedCode !== '') {
+                $productPatch = [
+                    'product' => $resolvedCode,
+                    'item_code' => $resolvedCode,
+                ];
+                if ($workOrder->item_id !== null) {
+                    $productPatch['item_id'] = $workOrder->item_id;
+                }
+                $workOrder->update($productPatch);
+
+                ProductionBatch::query()
+                    ->where('work_order_id', $workOrder->id)
+                    ->where('status', '!=', 'completed')
+                    ->update([
+                        'product_name' => $resolvedCode,
+                    ]);
+            }
+        }
+
+        if (array_key_exists('quantity', $validated) && $validated['quantity'] !== null) {
+            $plannedQty = max(1, (int) $validated['quantity']);
+            ProductionBatch::query()
+                ->where('work_order_id', $workOrder->id)
+                ->where('status', '!=', 'completed')
+                ->update(['quantity' => $plannedQty]);
+        }
 
         if ($this->materialsTableExists()) {
             $workOrder->materials()->delete();
@@ -277,16 +335,42 @@ class WorkOrderController extends Controller
             $workOrder->load(['materials.inventoryItem']);
         }
 
-        if ($workOrder->supervisor_status === 'wip') {
+        if (in_array($workOrder->supervisor_status, ['wip', 'rejection'], true)) {
+            $stageCount = count($stages);
             ProductionBatch::query()
                 ->where('work_order_id', $workOrder->id)
                 ->where('status', '!=', 'completed')
-                ->update(['total_stages' => count($stages)]);
+                ->get()
+                ->each(function (ProductionBatch $batch) use ($stages, $stageCount, $workOrder) {
+                    $stageOrder = max(1, min((int) $batch->stage_order, $stageCount));
+                    $currentStage = $stages[$stageOrder - 1]['name'] ?? $batch->current_stage;
+                    $updates = [
+                        'total_stages' => $stageCount,
+                        'stage_order' => $stageOrder,
+                        'current_stage_index' => $stageOrder - 1,
+                        'current_stage' => $currentStage,
+                    ];
+                    if ($workOrder->workflow_id !== null) {
+                        $updates['workflow_id'] = $workOrder->workflow_id;
+                    }
+                    $batch->update($updates);
+                });
+
+            if ($this->priorityColumnExists() && isset($validated['priority'])) {
+                ProductionBatch::query()
+                    ->where('work_order_id', $workOrder->id)
+                    ->where('status', '!=', 'completed')
+                    ->update(['priority' => $validated['priority']]);
+            }
         }
 
-        return response()->json($this->format($workOrder->fresh(
-            $this->materialsTableExists() ? ['materials.inventoryItem'] : [],
-        )));
+        return response()->json([
+            'success' => true,
+            'message' => 'Route card updated',
+            'data' => $this->format($workOrder->fresh(
+                $this->materialsTableExists() ? ['materials.inventoryItem'] : [],
+            )),
+        ]);
     }
 
     public function updatePriority(Request $request, WorkOrder $workOrder): JsonResponse
@@ -324,6 +408,8 @@ class WorkOrderController extends Controller
         ]);
 
         $previousStatus = $workOrder->supervisor_status ?? 'pending';
+
+        $this->assertWorkOrderHasItemCode($workOrder);
 
         $workOrder->update([
             'supervisor_status' => $data['supervisor_status'],
@@ -373,7 +459,7 @@ class WorkOrderController extends Controller
     {
         if (strcasecmp((string) $request->user()?->role, 'admin') !== 0) {
             return response()->json([
-                'message' => 'Only admin can delete work orders',
+                'message' => 'Only admin can delete route cards',
             ], Response::HTTP_FORBIDDEN);
         }
 
@@ -385,7 +471,6 @@ class WorkOrderController extends Controller
 
         ProductionBatch::query()
             ->where('work_order_id', $workOrder->id)
-            ->where('status', '!=', 'completed')
             ->delete();
 
         JobWork::query()
@@ -411,6 +496,8 @@ class WorkOrderController extends Controller
 
     public function prepareWip(WorkOrder $workOrder): JsonResponse
     {
+        $this->assertWorkOrderHasItemCode($workOrder);
+
         $fresh = $this->backfillWorkOrderStages($workOrder->fresh(
             $this->materialsTableExists() ? ['materials.inventoryItem'] : [],
         ));
@@ -613,12 +700,16 @@ class WorkOrderController extends Controller
             if ($name === '') {
                 continue;
             }
-            $normalized[] = [
+            $row = [
                 ...$stage,
                 'name' => $name,
                 'machine_name' => trim((string) ($stage['machine_name'] ?? $name)),
                 'order' => (int) ($stage['order'] ?? ($index + 1)),
             ];
+            if (array_key_exists('rate', $stage) && $stage['rate'] !== null && $stage['rate'] !== '') {
+                $row['rate'] = (float) $stage['rate'];
+            }
+            $normalized[] = $row;
         }
 
         return $normalized;
@@ -648,28 +739,30 @@ class WorkOrderController extends Controller
 
     private function resolveBatchNumberForWorkOrder(int $workOrderId): string
     {
-        $base = 'WO-'.str_replace('-', '', (string) $workOrderId);
-
-        if (! ProductionBatch::query()->where('batch_number', $base)->exists()) {
-            return $base;
-        }
-
-        $revision = 2;
-        while (ProductionBatch::query()->where('batch_number', "{$base}-R{$revision}")->exists()) {
-            $revision++;
-        }
-
-        return "{$base}-R{$revision}";
+        return 'WO-'.str_replace('-', '', (string) $workOrderId);
     }
 
     private function ensureProductionBatchForWorkOrder(WorkOrder $workOrder): void
     {
+        if ($this->resolveItemCodeForWorkOrder($workOrder) === '') {
+            Log::warning('[API][work-orders] skip batch — missing item code', [
+                'work_order_id' => $workOrder->id,
+            ]);
+
+            return;
+        }
+
         $hasActiveBatch = ProductionBatch::query()
             ->where('work_order_id', $workOrder->id)
             ->where('status', '!=', 'completed')
             ->exists();
 
         if ($hasActiveBatch) {
+            return;
+        }
+
+        // Do not spawn WO-*-R2/R3 cards when production already ran for this route card.
+        if (ProductionBatch::query()->where('work_order_id', $workOrder->id)->exists()) {
             return;
         }
 
@@ -764,6 +857,82 @@ class WorkOrderController extends Controller
         return $validated;
     }
 
+    /**
+     * @param  array<string, mixed>  $validated
+     * @return array<string, mixed>
+     */
+    private function enforceItemCodeForRouteCard(array $validated): array
+    {
+        if (($validated['supervisor_status'] ?? 'pending') === 'draft') {
+            return $validated;
+        }
+
+        return $this->fillAndRequireItemCode($validated);
+    }
+
+    private function assertWorkOrderHasItemCode(WorkOrder $workOrder): void
+    {
+        if ($this->resolveItemCodeForWorkOrder($workOrder) === '') {
+            throw ValidationException::withMessages([
+                'item_code' => 'Item code is required to create a route card. Select an item from the catalog.',
+            ]);
+        }
+    }
+
+    private function resolveItemCodeForWorkOrder(WorkOrder $workOrder): string
+    {
+        return $this->resolveItemCode(
+            $workOrder->item_code,
+            $workOrder->item_id !== null ? (int) $workOrder->item_id : null,
+        );
+    }
+
+    private function resolveItemCode(?string $itemCode, ?int $itemId): string
+    {
+        $code = DisplayValue::normalize($itemCode) ?? '';
+
+        if ($code === '' && $itemId !== null && $itemId > 0) {
+            $item = Item::query()->find($itemId);
+            if ($item !== null) {
+                $code = DisplayValue::normalize($item->code) ?? '';
+            }
+        }
+
+        return $code;
+    }
+
+    /**
+     * @param  array<string, mixed>  $validated
+     * @return array<string, mixed>
+     */
+    private function fillAndRequireItemCode(array $validated): array
+    {
+        $itemId = ! empty($validated['item_id']) ? (int) $validated['item_id'] : null;
+        $code = $this->resolveItemCode(
+            isset($validated['item_code']) ? (string) $validated['item_code'] : null,
+            $itemId,
+        );
+
+        if ($code === '') {
+            throw ValidationException::withMessages([
+                'item_code' => 'Item code is required to create a route card. Select an item from the catalog.',
+            ]);
+        }
+
+        $validated['item_code'] = $code;
+
+        if ($itemId === null) {
+            $item = Item::query()
+                ->whereRaw('LOWER(code) = ?', [strtolower($code)])
+                ->first();
+            if ($item !== null) {
+                $validated['item_id'] = $item->id;
+            }
+        }
+
+        return $validated;
+    }
+
     private function validatedPayload(Request $request): array
     {
         return $request->validate([
@@ -773,7 +942,7 @@ class WorkOrderController extends Controller
             'client_name' => 'nullable|string|max:255',
             'vendor_id' => 'nullable|integer',
             'vendor_name' => 'nullable|string|max:255',
-            'item_id' => 'nullable|integer',
+            'item_id' => 'nullable|integer|exists:items,id',
             'product' => 'nullable|string|max:255',
             'item_code' => 'nullable|string|max:255',
             'unit' => 'nullable|string|max:50',
@@ -829,6 +998,13 @@ class WorkOrderController extends Controller
         $displayCode = filled($order->item_code)
             ? trim($order->item_code)
             : ($item?->code ?: trim((string) $order->product));
+        $productLabel = trim((string) $order->product);
+        $catalogName = $item?->name ? trim((string) $item->name) : '';
+        if ($catalogName === '' || strcasecmp($catalogName, $displayCode) === 0) {
+            if ($productLabel !== '' && strcasecmp($productLabel, $displayCode) !== 0) {
+                $catalogName = $productLabel;
+            }
+        }
 
         return [
             'name' => $displayCode,
@@ -836,6 +1012,9 @@ class WorkOrderController extends Controller
             'item_id' => $order->item_id ?? $item?->id,
             'item_code' => $order->item_code ?: $item?->code,
             'description' => $item?->description,
+            'catalog_name' => $catalogName !== '' && strcasecmp($catalogName, $displayCode) !== 0
+                ? $catalogName
+                : null,
             'unit' => $order->unit ?? 'pcs',
             'quantity' => $order->quantity,
             'default_qty' => $order->quantity,
@@ -880,20 +1059,24 @@ class WorkOrderController extends Controller
             : [];
 
         $item = $this->resolveItemForWorkOrder($order);
-        $itemCode = filled($order->item_code)
-            ? trim($order->item_code)
-            : ($item?->code ? trim($item->code) : null);
+        $itemCode = DisplayValue::normalize($order->item_code)
+            ?? DisplayValue::normalize($item?->code)
+            ?? DisplayValue::normalize($order->product)
+            ?? DisplayValue::normalize($order->workflow_name);
+        $displayProduct = $itemCode
+            ?? DisplayValue::normalize($order->product)
+            ?? DisplayValue::normalize($order->workflow_name);
 
         return [
             'id' => $order->id,
             'workflow_id' => $order->workflow_id,
-            'workflow_name' => $order->workflow_name,
+            'workflow_name' => DisplayValue::normalize($order->workflow_name) ?? $order->workflow_name,
             'client_id' => $order->client_id,
             'client_name' => $order->client_name,
             'vendor_id' => $order->vendor_id,
             'vendor_name' => $order->vendor_name,
             'item_id' => $order->item_id ?? $item?->id,
-            'product' => $order->product,
+            'product' => $displayProduct,
             'item_code' => $itemCode,
             'unit' => $order->unit,
             'quantity' => $order->quantity,
@@ -948,17 +1131,20 @@ class WorkOrderController extends Controller
             return $item;
         }
 
-        if (filled($order->item_code)) {
+        $itemCode = DisplayValue::normalize($order->item_code);
+        if ($itemCode !== null) {
             $item = Item::query()
-                ->whereRaw('LOWER(code) = ?', [strtolower(trim($order->item_code))])
+                ->whereRaw('LOWER(code) = ?', [strtolower($itemCode)])
                 ->first();
             if ($item !== null) {
                 return $item;
             }
         }
 
-        if (filled($order->product)) {
-            $key = strtolower(trim($order->product));
+        $productKey = DisplayValue::normalize($order->product)
+            ?? DisplayValue::normalize($order->workflow_name);
+        if ($productKey !== null) {
+            $key = strtolower($productKey);
 
             return Item::query()
                 ->whereRaw('LOWER(code) = ?', [$key])

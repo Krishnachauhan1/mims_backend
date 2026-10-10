@@ -33,7 +33,15 @@ class PackingController extends Controller
 
         $status = trim((string) $request->string('status', ''));
         if ($status !== '' && $status !== 'all') {
-            $query->where('status', $status);
+            if ($status === 'hold') {
+                $query->where(function ($builder): void {
+                    $builder
+                        ->where('status', 'hold')
+                        ->orWhere('hold_qty', '>', 0);
+                });
+            } else {
+                $query->where('status', $status);
+            }
         }
 
         $search = trim((string) $request->string('search', ''));
@@ -57,8 +65,12 @@ class PackingController extends Controller
             'meta' => [
                 'total' => $entries->count(),
                 'pending' => $entries->where('status', 'pending')->count(),
-                'hold' => $entries->where('status', 'hold')->count(),
+                'hold' => $entries->filter(
+                    fn (array $row) => ($row['status'] ?? '') === 'hold'
+                        || (int) ($row['hold_qty'] ?? 0) > 0,
+                )->count(),
                 'rejected' => $entries->where('status', 'rejected')->count(),
+                'partial' => $entries->where('status', 'partial')->count(),
                 'packed' => $entries->where('status', 'packed')->count(),
             ],
         ]);
@@ -71,11 +83,15 @@ class PackingController extends Controller
         }
 
         $data = $request->validate([
-            'status' => 'required|in:packed,hold,rejected',
+            'status' => 'required|in:packed,hold,rejected,partial',
             'notes' => 'nullable|string|max:2000',
             'hold_reason' => 'nullable|string|max:500',
             'reject_reason' => 'nullable|string|max:500',
             'packed_qty' => 'nullable|integer|min:1',
+            'hold_qty' => 'nullable|integer|min:1',
+            'reject_qty' => 'nullable|integer|min:1',
+            'rework_assigned_to' => 'nullable|string|max:255',
+            'rework_assigned_to_user_id' => 'nullable|integer|exists:users,id',
         ]);
 
         $status = $data['status'];
@@ -88,7 +104,8 @@ class PackingController extends Controller
             ]);
         }
 
-        if ($status === 'rejected' && trim((string) ($data['reject_reason'] ?? '')) === '') {
+        if (in_array($status, ['rejected', 'partial'], true)
+            && trim((string) ($data['reject_reason'] ?? '')) === '') {
             throw ValidationException::withMessages([
                 'reject_reason' => ['Rejection reason is required.'],
             ]);
@@ -111,34 +128,137 @@ class PackingController extends Controller
             ]);
         }
 
+        $remaining = $this->packingService->remainingQty($packing);
+
         $updates = [
             'status' => $status,
             'notes' => $notes,
             'action_by' => $actor,
             'action_at' => now(),
             'hold_reason' => $status === 'hold' ? trim((string) $data['hold_reason']) : null,
-            'reject_reason' => $status === 'rejected' ? trim((string) $data['reject_reason']) : null,
+            'reject_reason' => in_array($status, ['rejected', 'partial'], true)
+                ? trim((string) $data['reject_reason'])
+                : null,
         ];
 
-        if ($status === 'packed') {
-            $packedQty = (int) ($data['packed_qty'] ?? $packing->quantity);
-            $packedQty = min(max(1, $packedQty), max(1, (int) $packing->quantity));
-            $updates['packed_qty'] = $packedQty;
+        if ($status === 'partial') {
+            if ($remaining < 2) {
+                throw ValidationException::withMessages([
+                    'reject_qty' => ['Partial reject needs at least 2 units pending at packing.'],
+                ]);
+            }
+
+            $rejectQty = (int) ($data['reject_qty'] ?? 0);
+            if ($rejectQty < 1 || $rejectQty >= $remaining) {
+                throw ValidationException::withMessages([
+                    'reject_qty' => ["Enter a reject quantity between 1 and ".($remaining - 1).'.'],
+                ]);
+            }
+
+            $assigneeName = trim((string) ($data['rework_assigned_to'] ?? ''));
+            if ($assigneeName === '') {
+                throw ValidationException::withMessages([
+                    'rework_assigned_to' => ['Select a user to assign rejected items for rework.'],
+                ]);
+            }
+
+            $packedQty = $remaining - $rejectQty;
+            $updates['rejected_qty'] = (int) ($packing->rejected_qty ?? 0) + $rejectQty;
+            $updates['packed_qty'] = (int) $packing->packed_qty + $packedQty;
+            $updates['status'] = 'partial';
             $updates['packed_by'] = $actor;
             $updates['packed_at'] = now();
+
+            $packing->update($updates);
+            $packing = $packing->fresh(['workOrder', 'qualityInspection']);
+
+            $this->packingService->handlePartialPackingRejectAndPack(
+                $packing,
+                $rejectQty,
+                $packedQty,
+                trim((string) $data['reject_reason']),
+                $assigneeName,
+                isset($data['rework_assigned_to_user_id'])
+                    ? (int) $data['rework_assigned_to_user_id']
+                    : null,
+                $actor,
+            );
+
+            return response()->json([
+                'success' => true,
+                'message' => "{$rejectQty} rejected · {$packedQty} released to inventory",
+                'data' => $this->format($packing->fresh(['workOrder', 'qualityInspection'])),
+            ]);
+        }
+
+        if ($status === 'packed') {
+            $packedQty = (int) ($data['packed_qty'] ?? $remaining);
+            if ($remaining < 1) {
+                throw ValidationException::withMessages([
+                    'packed_qty' => ['Nothing left to pack for this batch.'],
+                ]);
+            }
+            if ($packedQty < 1 || $packedQty > $remaining) {
+                throw ValidationException::withMessages([
+                    'packed_qty' => ["Enter pack quantity between 1 and {$remaining}."],
+                ]);
+            }
+            $updates['packed_qty'] = (int) $packing->packed_qty + $packedQty;
+            $updates['packed_by'] = $actor;
+            $updates['packed_at'] = now();
+            $remainingAfter = $remaining - $packedQty;
+            $updates['status'] = $remainingAfter > 0 ? 'pending' : 'packed';
+        }
+
+        if ($status === 'hold') {
+            $holdQty = (int) ($data['hold_qty'] ?? $remaining);
+            if ($remaining < 1) {
+                throw ValidationException::withMessages([
+                    'hold_qty' => ['Nothing left to hold for this batch.'],
+                ]);
+            }
+            if ($holdQty < 1 || $holdQty > $remaining) {
+                throw ValidationException::withMessages([
+                    'hold_qty' => ["Enter hold quantity between 1 and {$remaining}."],
+                ]);
+            }
+            $updates['hold_qty'] = (int) ($packing->hold_qty ?? 0) + $holdQty;
+            $remainingAfterHold = $remaining - $holdQty;
+            $updates['status'] = $remainingAfterHold > 0 ? 'pending' : 'hold';
+        }
+
+        if ($status === 'rejected') {
+            $updates['rejected_qty'] = (int) ($packing->rejected_qty ?? 0) + $remaining;
         }
 
         $packing->update($updates);
+        $packing = $packing->fresh(['workOrder', 'qualityInspection']);
+
+        if ($status === 'packed') {
+            $packedThisAction = (int) ($data['packed_qty'] ?? $remaining);
+            $packedThisAction = min(max(1, $packedThisAction), max(1, $remaining));
+            $this->packingService->releasePackedStockToInventory(
+                $packing,
+                $packedThisAction,
+            );
+        } elseif ($status === 'rejected') {
+            $this->packingService->handlePackingRejected($packing);
+        }
 
         return response()->json([
             'success' => true,
             'message' => match ($status) {
-                'packed' => 'Marked as packed',
-                'hold' => 'Placed on hold',
+                'packed' => isset($remainingAfter) && $remainingAfter > 0
+                    ? "{$packedQty} packed · {$remainingAfter} still pending"
+                    : 'Marked as packed',
+                'hold' => isset($remainingAfterHold) && $remainingAfterHold > 0
+                    ? "{$holdQty} on hold · {$remainingAfterHold} still pending"
+                    : 'Placed on hold',
                 'rejected' => 'Marked as rejected',
+                'partial' => 'Partial reject — remainder released to inventory',
                 default => 'Packing updated',
             },
-            'data' => $this->format($packing->fresh(['workOrder', 'qualityInspection'])),
+            'data' => $this->format($packing),
         ]);
     }
 
@@ -191,7 +311,9 @@ class PackingController extends Controller
             'client_name' => $entry->client_name,
             'quantity' => $entry->quantity,
             'packed_qty' => $entry->packed_qty,
-            'remaining_qty' => max(0, (int) $entry->quantity - (int) $entry->packed_qty),
+            'rejected_qty' => (int) ($entry->rejected_qty ?? 0),
+            'hold_qty' => (int) ($entry->hold_qty ?? 0),
+            'remaining_qty' => $this->packingService->remainingQty($entry),
             'unit' => $entry->unit,
             'status' => $entry->status,
             'inspected_by' => $entry->inspected_by,

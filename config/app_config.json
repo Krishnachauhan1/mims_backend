@@ -69,7 +69,30 @@
           }
         ]
       },
-      
+      {
+        "id": "material_requisition",
+        "name": "Material Request",
+        "icon": "assignment_outlined",
+        "route": "/material-requisition",
+        "section": "operations",
+        "order": 8,
+        "entry_permission": "material_requisition.view",
+        "permissions": [
+          {
+            "key": "material_requisition.view",
+            "label": "View material requests",
+            "is_entry": true
+          },
+          {
+            "key": "material_requisition.request",
+            "label": "Request raw materials"
+          },
+          {
+            "key": "material_requisition.manage",
+            "label": "Assign / issue materials to machines"
+          }
+        ]
+      },
       {
         "id": "checkin",
         "name": "Check-In / Check-Out",
@@ -158,6 +181,23 @@
           {
             "key": "production.update",
             "label": "Update Production Status"
+          }
+        ]
+      },
+
+      {
+        "id": "machine_floor",
+        "name": "Machine Floor",
+        "icon": "factory_outlined",
+        "route": "/machine-floor",
+        "section": "operations",
+        "order": 4,
+        "entry_permission": "machine_floor.view",
+        "permissions": [
+          {
+            "key": "machine_floor.view",
+            "label": "View live machine work",
+            "is_entry": true
           }
         ]
       },
@@ -585,6 +625,8 @@
           "dashboard.view",
           "tasks.view",
           "inventory.view",
+          "material_requisition.view",
+          "material_requisition.manage",
           "items.view",
           "items.manage",
           "workflow.view",
@@ -592,6 +634,7 @@
           "workflow.update_status",
           "production.view",
           "production.update",
+          "machine_floor.view",
           "daily_production.view",
           "daily_production.manage",
           "expenses.view",
@@ -627,6 +670,8 @@
           "dashboard.view",
           "tasks.view",
           "inventory.view",
+          "material_requisition.view",
+          "material_requisition.manage",
           "inventory.add",
           "inventory.edit",
           "items.view",
@@ -667,6 +712,8 @@
           "dashboard.view",
           "tasks.view",
           "inventory.view",
+          "material_requisition.view",
+          "material_requisition.manage",
           "checkin.view",
           "checkin.create",
           "checkout.create",
@@ -675,6 +722,7 @@
           "workflow.view",
           "workflow.move",
           "production.view",
+          "machine_floor.view",
           "daily_production.view",
           "daily_production.manage",
           "job_work.view",
@@ -706,6 +754,8 @@
           "dashboard.view",
           "tasks.view",
           "inventory.view",
+          "material_requisition.view",
+          "material_requisition.request",
           "checkin.view",
           "items.view",
           "workflow.view",

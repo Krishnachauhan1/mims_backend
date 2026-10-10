@@ -11,10 +11,15 @@ use App\Models\Rejection;
 use App\Models\User;
 use App\Models\WorkOrder;
 use App\Models\Workflow;
+use App\Models\Machinery;
 use App\Services\AppNotificationService;
+use App\Services\BatchStageMachineService;
+use App\Services\InventoryStockAllocationService;
 use App\Services\JobWorkFlowService;
 use App\Services\MaterialSpecResolver;
+use App\Services\PermissionService;
 use App\Services\TaskMaterialService;
+use App\Support\DisplayValue;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -28,6 +33,7 @@ class ProductionController extends Controller
         private JobWorkFlowService $jobWorkFlow,
         private TaskMaterialService $taskMaterials,
         private MaterialSpecResolver $materialSpec,
+        private InventoryStockAllocationService $stockAllocation,
     ) {}
     public function batches(): JsonResponse
     {
@@ -151,6 +157,33 @@ class ProductionController extends Controller
         }
 
         return response()->json($this->format($batch->fresh('workflow')), 201);
+    }
+
+    public function destroyBatch(Request $request, ProductionBatch $batch): JsonResponse
+    {
+        if (strcasecmp((string) $request->user()?->role, 'admin') !== 0) {
+            return response()->json([
+                'message' => 'Only admin can delete production cards',
+            ], 403);
+        }
+
+        if ($batch->status === 'completed') {
+            return response()->json([
+                'message' => 'Completed production batches cannot be deleted',
+            ], 422);
+        }
+
+        ProductionBatch::query()
+            ->where('parent_batch_id', $batch->id)
+            ->where('status', '!=', 'completed')
+            ->delete();
+
+        $batch->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Production card removed',
+        ]);
     }
 
     public function advanceStage(Request $request): JsonResponse
@@ -490,11 +523,18 @@ class ProductionController extends Controller
     public function indexMaterialRequests(Request $request): JsonResponse
     {
         $query = BatchMaterialRequest::query()
-            ->with('productionBatch')
+            ->with(['productionBatch.workOrder', 'productionBatch.workflow'])
             ->latest();
 
         if ($request->filled('status')) {
             $query->where('status', $request->string('status')->toString());
+        }
+
+        if ($request->boolean('mine')) {
+            $userId = $request->user()?->id;
+            if ($userId !== null) {
+                $query->where('requested_by_user_id', $userId);
+            }
         }
 
         $requests = $query->get()->map(
@@ -521,26 +561,24 @@ class ProductionController extends Controller
 
         $batch = ProductionBatch::query()->findOrFail($materialRequest->production_batch_id);
 
-        if ($data['action'] === 'approve' && $materialRequest->inventory_item_id !== null) {
-            $qty = (int) ceil((float) $materialRequest->quantity);
-            if ($qty < 1) {
-                $qty = 1;
-            }
-
-            $this->taskMaterials->attachAndConsume(
-                $batch,
-                [
-                    [
-                        'inventory_item_id' => (int) $materialRequest->inventory_item_id,
-                        'quantity' => $qty,
-                    ],
-                ],
-                "Material request #{$materialRequest->id}",
-                'Production batch '.$batch->batch_number,
-                $request->user()?->id,
-                $batch->id,
-                $batch->work_order_id,
+        if ($data['action'] === 'approve') {
+            $lines = $this->stockAllocation->buildAllocationLines(
+                $materialRequest->inventory_item_id,
+                $materialRequest->item_name,
+                (float) $materialRequest->quantity,
             );
+
+            if ($lines !== []) {
+                $this->taskMaterials->attachAndConsume(
+                    $batch,
+                    $lines,
+                    "Material request #{$materialRequest->id}",
+                    'Production batch '.$batch->batch_number,
+                    $request->user()?->id,
+                    $batch->id,
+                    $batch->work_order_id,
+                );
+            }
         }
 
         $materialRequest->update([
@@ -842,9 +880,23 @@ class ProductionController extends Controller
             throw new HttpException(422, 'Batch is already completed');
         }
 
+        if ($user === null) {
+            throw new HttpException(401, 'Unauthenticated');
+        }
+
+        $permissions = app(PermissionService::class);
+        if ($permissions->userCan($user, 'workflow.view')) {
+            return;
+        }
+
         if ($this->isMachineOperator($user)) {
             $this->assertMachineOperatorCanUpdateStage($user, $batch);
         }
+
+        throw new HttpException(
+            403,
+            'You do not have Route Card access to request material',
+        );
     }
 
     private function assertMachineOperatorCanUpdateStage(?User $user, ProductionBatch $batch): void
@@ -1003,6 +1055,30 @@ class ProductionController extends Controller
     }
 
     /**
+     * @param  array<int, array<string, mixed>>  $stages
+     */
+    private function resolveNextMachineNameForBatch(ProductionBatch $batch, array $stages): ?string
+    {
+        if ($batch->status === 'completed') {
+            return null;
+        }
+
+        $stageOrder = max(1, (int) $batch->stage_order);
+        if ($stages === [] || $stageOrder >= count($stages)) {
+            return null;
+        }
+
+        $next = $stages[$stageOrder] ?? null;
+        if (! is_array($next)) {
+            return null;
+        }
+
+        $label = trim($this->resolveStageDisplayLabel($next));
+
+        return $label !== '' && $label !== 'Unknown stage' ? $label : null;
+    }
+
+    /**
      * @return array<int, array<string, mixed>>
      */
     private function resolveStagesForBatch(ProductionBatch $batch): array
@@ -1112,14 +1188,10 @@ class ProductionController extends Controller
     private function format(ProductionBatch $batch): array
     {
         $isJobWorkStage = $this->detectJobWorkStage($batch);
-        $jobWorkFlowState = 'not_job_work';
         try {
-            $jobWorkFlowState = $this->jobWorkFlow->flowState($batch);
+            $jobWorkFlowState = $this->jobWorkFlow->displayFlowState($batch, $isJobWorkStage);
         } catch (\Throwable) {
             $jobWorkFlowState = $isJobWorkStage ? 'ready_to_send' : 'not_job_work';
-        }
-        if ($isJobWorkStage && $jobWorkFlowState === 'not_job_work') {
-            $jobWorkFlowState = 'ready_to_send';
         }
 
         try {
@@ -1136,16 +1208,33 @@ class ProductionController extends Controller
             $isLastStage = $stageOrder >= $totalStages;
         }
 
+        $totalStagesResolved = max(
+            count($stages),
+            max(1, (int) ($batch->total_stages ?? 1)),
+        );
+        $nextMachineName = $this->resolveNextMachineNameForBatch($batch, $stages);
+
+        $parentBatchNumber = null;
+        if (
+            Schema::hasColumn('production_batches', 'parent_batch_id')
+            && $batch->parent_batch_id
+        ) {
+            $parentBatchNumber = ProductionBatch::query()
+                ->where('id', $batch->parent_batch_id)
+                ->value('batch_number');
+        }
+
+        $workOrder = $batch->relationLoaded('workOrder')
+            ? $batch->workOrder
+            : ($batch->work_order_id
+                ? WorkOrder::query()->find($batch->work_order_id)
+                : null);
+
         $workflowName = $batch->workflow?->name;
-        if (! filled($workflowName) && $batch->work_order_id) {
-            $workOrder = $batch->relationLoaded('workOrder')
-                ? $batch->workOrder
-                : WorkOrder::query()->find($batch->work_order_id);
-            if ($workOrder !== null) {
-                $workflowName = $workOrder->route_card_no
-                    ?: $workOrder->workflow_name
-                    ?: $workOrder->product;
-            }
+        if (! filled($workflowName) && $workOrder !== null) {
+            $workflowName = $workOrder->route_card_no
+                ?: $workOrder->workflow_name
+                ?: $workOrder->product;
         }
 
         $materialSpec = null;
@@ -1155,17 +1244,23 @@ class ProductionController extends Controller
             report($e);
         }
 
+        $resolvedItemCode = DisplayValue::normalize($workOrder?->item_code)
+            ?? DisplayValue::normalize($workOrder?->product)
+            ?? DisplayValue::normalize($workOrder?->workflow_name);
+        $displayProduct = DisplayValue::normalize($batch->product_name) ?? $resolvedItemCode;
+
         return [
             'id' => $batch->id,
             'batch_number' => $batch->batch_number,
-            'product' => $batch->product_name,
-            'product_name' => $batch->product_name,
+            'product' => $displayProduct,
+            'product_name' => $displayProduct,
             'quantity' => $batch->quantity,
             'workflow_id' => $batch->workflow_id,
             'workflow' => $workflowName,
             'current_stage' => $batch->current_stage,
             'stage_order' => $batch->stage_order,
-            'total_stages' => $batch->total_stages,
+            'total_stages' => $totalStagesResolved,
+            'next_machine_name' => $nextMachineName,
             'status' => $batch->status,
             'priority' => $batch->priority ?? 'normal',
             'started_at' => $this->safeDateTime($batch->started_at),
@@ -1185,8 +1280,15 @@ class ProductionController extends Controller
             'user_name' => $batch->user_name,
             'checkin_id' => $batch->checkin_id,
             'work_order_id' => $batch->work_order_id,
+            'route_card_no' => $workOrder?->route_card_no,
+            'item_code' => $resolvedItemCode,
+            'item_name' => $resolvedItemCode
+                ?? DisplayValue::normalize($workOrder?->item_name),
             'parent_batch_id' => Schema::hasColumn('production_batches', 'parent_batch_id')
                 ? $batch->parent_batch_id
+                : null,
+            'parent_batch_number' => $parentBatchNumber !== null
+                ? (string) $parentBatchNumber
                 : null,
             'stage_history' => $this->safeJsonArray($batch->stage_history),
             'activity_log' => $this->safeJsonArray($batch->activity_log),
@@ -1209,8 +1311,24 @@ class ProductionController extends Controller
         }
 
         $workflowName = null;
+        $routeCardNo = null;
+        $itemCode = null;
+        $itemName = null;
         if (! empty($row->workflow_id)) {
             $workflowName = DB::table('workflows')->where('id', $row->workflow_id)->value('name');
+        }
+        if (! empty($row->work_order_id)) {
+            $workOrder = DB::table('work_orders')->where('id', $row->work_order_id)->first();
+            if ($workOrder !== null) {
+                $routeCardNo = $workOrder->route_card_no ?? null;
+                $itemCode = $workOrder->item_code ?? null;
+                $itemName = $workOrder->item_name ?? $workOrder->product ?? null;
+                if (! filled($workflowName)) {
+                    $workflowName = $routeCardNo
+                        ?: ($workOrder->workflow_name ?? null)
+                        ?: ($workOrder->product ?? null);
+                }
+            }
         }
 
         $stageOrder = (int) ($row->stage_order ?? 1);
@@ -1247,6 +1365,9 @@ class ProductionController extends Controller
             'user_name' => $row->user_name ?? null,
             'checkin_id' => $row->checkin_id ?? null,
             'work_order_id' => $row->work_order_id ?? null,
+            'route_card_no' => $routeCardNo,
+            'item_code' => $itemCode,
+            'item_name' => $itemName,
             'parent_batch_id' => property_exists($row, 'parent_batch_id') ? $row->parent_batch_id : null,
             'stage_history' => $this->safeJsonArray($row->stage_history ?? null),
             'activity_log' => $this->safeJsonArray($row->activity_log ?? null),
@@ -1469,12 +1590,11 @@ class ProductionController extends Controller
             $model = ProductionBatch::query()->find($batchId);
             if ($model !== null) {
                 $isJobWorkStage = $this->detectJobWorkStage($model);
-                $flowState = $this->jobWorkFlow->flowState($model);
-                if ($isJobWorkStage && $flowState === 'not_job_work') {
-                    $flowState = 'ready_to_send';
-                }
 
-                return [$flowState, $isJobWorkStage];
+                return [
+                    $this->jobWorkFlow->displayFlowState($model, $isJobWorkStage),
+                    $isJobWorkStage,
+                ];
             }
         } catch (\Throwable) {
             // Use current_stage from the raw row.
@@ -1549,10 +1669,30 @@ class ProductionController extends Controller
         if ($includeBatch) {
             $batch = $request->relationLoaded('productionBatch')
                 ? $request->productionBatch
-                : ProductionBatch::query()->find($request->production_batch_id);
+                : ProductionBatch::query()->with(['workOrder', 'workflow'])->find($request->production_batch_id);
 
             $payload['batch_number'] = $batch?->batch_number;
             $payload['product_name'] = $batch?->product_name;
+            $payload['current_stage'] = $batch?->current_stage;
+
+            $workOrder = $batch?->relationLoaded('workOrder')
+                ? $batch->workOrder
+                : ($batch?->work_order_id
+                    ? WorkOrder::query()->find($batch->work_order_id)
+                    : null);
+            $payload['route_card_no'] = $workOrder?->route_card_no;
+
+            if ($batch !== null) {
+                $stageService = app(BatchStageMachineService::class);
+                $stage = $stageService->currentStageForBatch($batch);
+                $machineryId = $stage !== null ? $stageService->machineIdForStage($stage) : null;
+                if ($machineryId !== null && $machineryId > 0) {
+                    $machine = Machinery::query()->find($machineryId);
+                    $payload['machinery_id'] = $machineryId;
+                    $payload['machine_code'] = $machine?->machine_code;
+                    $payload['machine_name'] = $machine?->name;
+                }
+            }
         }
 
         return $payload;

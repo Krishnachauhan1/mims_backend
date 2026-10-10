@@ -68,9 +68,13 @@ class GaugeController extends Controller
             'certificate_size_kb' => 'nullable|integer|min:0',
         ]);
 
+        $intervalMonths = $this->intervalMonthsFor($gauge);
         $nextDue = $data['result'] === 'pass'
-            ? Carbon::parse($data['calibration_date'])->addMonths($this->intervalMonthsFor($gauge))->format('Y-m-d')
+            ? Carbon::parse($data['calibration_date'])->addMonths($intervalMonths)->format('Y-m-d')
             : $gauge->next_calibration_date?->format('Y-m-d');
+        $triggerDate = $data['result'] === 'pass' && $nextDue !== null
+            ? $this->defaultTriggerDate(Carbon::parse($nextDue))
+            : $gauge->calibration_trigger_date?->format('Y-m-d');
 
         $certificateRef = $data['certificate_ref'] ?? $data['certificate'] ?? null;
 
@@ -88,12 +92,19 @@ class GaugeController extends Controller
             $this->storeCalibrationCertificate($request, $gauge, $calibration, $certificateRef);
         }
 
-        $gauge->update([
+        $gaugeUpdates = [
             'last_calibration_date' => $data['calibration_date'],
             'next_calibration_date' => $nextDue,
             'calibration_status' => $data['result'] === 'pass' ? 'valid' : 'failed',
             'status' => $data['result'] === 'pass' ? 'active' : 'under_maintenance',
-        ]);
+        ];
+        if ($certificateRef !== null && trim($certificateRef) !== '') {
+            $gaugeUpdates['certificate_number'] = trim($certificateRef);
+        }
+        if ($triggerDate !== null) {
+            $gaugeUpdates['calibration_trigger_date'] = $triggerDate;
+        }
+        $gauge->update($gaugeUpdates);
 
         return response()->json($this->format($gauge->fresh('calibrations')));
     }
@@ -118,6 +129,73 @@ class GaugeController extends Controller
         }
 
         $this->storeCalibrationCertificate($request, $gauge, $calibration, $ref);
+
+        return response()->json($this->format($gauge->fresh('calibrations')));
+    }
+
+    /**
+     * Link an existing document row to a calibration (JSON only — avoids WAF on multipart /certificate).
+     */
+    public function linkCalibrationDocument(
+        Request $request,
+        Gauge $gauge,
+        GaugeCalibration $calibration,
+    ): JsonResponse {
+        if ($calibration->gauge_id !== $gauge->id) {
+            return response()->json(['message' => 'Calibration not found for this instrument'], 404);
+        }
+
+        $data = $request->validate([
+            'document_id' => 'required|integer|exists:documents,id',
+        ]);
+
+        $document = Document::query()->findOrFail($data['document_id']);
+        if ($document->module !== 'gauge') {
+            return response()->json(['message' => 'Document is not a gauge attachment'], 422);
+        }
+
+        $allowedEntityIds = collect([
+            $gauge->instrument_id,
+            (string) $gauge->id,
+        ])->filter()->unique()->values()->all();
+
+        if (! in_array($document->entity_id, $allowedEntityIds, true)) {
+            return response()->json(['message' => 'Document does not belong to this instrument'], 422);
+        }
+
+        $calibration->document_id = $document->id;
+        if ($calibration->certificate_ref === null || trim((string) $calibration->certificate_ref) === '') {
+            $calibration->certificate_ref = $document->file_name;
+        }
+        $calibration->save();
+
+        return response()->json($this->format($gauge->fresh('calibrations')));
+    }
+
+    /**
+     * Remove certificate file/link from a calibration (does not delete the calibration row).
+     */
+    public function clearCalibrationCertificate(
+        Gauge $gauge,
+        GaugeCalibration $calibration,
+    ): JsonResponse {
+        if ($calibration->gauge_id !== $gauge->id) {
+            return response()->json(['message' => 'Calibration not found for this instrument'], 404);
+        }
+
+        if ($calibration->document_id !== null) {
+            $document = Document::query()->find($calibration->document_id);
+            if ($document !== null) {
+                if (Storage::exists($document->file_path)) {
+                    Storage::delete($document->file_path);
+                }
+                $document->delete();
+            }
+        }
+
+        $calibration->document_id = null;
+        $calibration->certificate_ref = null;
+        $calibration->save();
 
         return response()->json($this->format($gauge->fresh('calibrations')));
     }
@@ -179,42 +257,107 @@ class GaugeController extends Controller
             'type' => 'nullable|string|max:255',
             'category' => 'nullable|string|max:255',
             'manufacturer' => 'nullable|string|max:255',
+            'make' => 'nullable|string|max:255',
             'location' => 'nullable|string|max:255',
+            'measuring_range' => 'nullable|string|max:255',
+            'range' => 'nullable|string|max:255',
+            'least_count' => 'nullable|string|max:255',
+            'calibration_agency' => 'nullable|string|max:255',
+            'cal_agency' => 'nullable|string|max:255',
+            'certificate_number' => 'nullable|string|max:255',
+            'certificate_no' => 'nullable|string|max:255',
             'status' => 'nullable|string|max:255',
             'last_calibration_date' => 'nullable|date',
+            'calibration_trigger_date' => 'nullable|date',
+            'trigger_date' => 'nullable|date',
             'next_due_date' => 'nullable|date',
             'next_calibration_date' => 'nullable|date',
             'interval_months' => 'nullable|integer|min:1|max:120',
+            'calibration_frequency_months' => 'nullable|integer|min:1|max:120',
         ]);
+
+        $intervalMonths = (int) (
+            $data['calibration_frequency_months']
+            ?? $data['interval_months']
+            ?? $gauge?->calibration_frequency_months
+            ?? 12
+        );
+        $intervalMonths = max(1, min(120, $intervalMonths));
+
+        $nextDueRaw = $data['next_due_date'] ?? $data['next_calibration_date'] ?? null;
+        $nextDue = $nextDueRaw !== null ? Carbon::parse($nextDueRaw) : null;
+        $triggerRaw = $data['calibration_trigger_date'] ?? $data['trigger_date'] ?? null;
+        $triggerDate = $triggerRaw !== null
+            ? Carbon::parse($triggerRaw)
+            : ($nextDue !== null ? $this->defaultTriggerDate($nextDue) : null);
+
+        $certificateNumber = trim((string) (
+            $data['certificate_number']
+            ?? $data['certificate_no']
+            ?? $gauge?->certificate_number
+            ?? ''
+        ));
 
         return [
             'instrument_id' => $data['instrument_id'],
             'name' => $data['name'],
             'type' => $data['category'] ?? $data['type'] ?? null,
-            'manufacturer' => $data['manufacturer'] ?? null,
+            'manufacturer' => $data['manufacturer'] ?? $data['make'] ?? null,
             'location' => $data['location'] ?? null,
+            'measuring_range' => $data['measuring_range'] ?? $data['range'] ?? null,
+            'least_count' => $data['least_count'] ?? null,
+            'calibration_agency' => $data['calibration_agency'] ?? $data['cal_agency'] ?? null,
+            'calibration_frequency_months' => $intervalMonths,
             'status' => $data['status'] ?? ($gauge?->status ?? 'active'),
             'last_calibration_date' => $data['last_calibration_date'] ?? null,
-            'next_calibration_date' => $data['next_due_date'] ?? $data['next_calibration_date'] ?? null,
+            'calibration_trigger_date' => $triggerDate?->format('Y-m-d'),
+            'next_calibration_date' => $nextDue?->format('Y-m-d'),
+            'certificate_number' => $certificateNumber !== '' ? $certificateNumber : null,
             'calibration_status' => $gauge?->calibration_status ?? 'valid',
         ];
     }
 
     private function format(Gauge $gauge): array
     {
+        $latestCertificate = $gauge->certificate_number
+            ?: $gauge->calibrations->sortByDesc('calibration_date')->first()?->certificate_ref;
+
+        $triggerDate = $gauge->calibration_trigger_date
+            ?? ($gauge->next_calibration_date !== null
+                ? $this->defaultTriggerDate($gauge->next_calibration_date)
+                : null);
+
         return [
             'id' => $gauge->id,
             'instrument_id' => $gauge->instrument_id,
+            'ident_no' => $gauge->instrument_id,
             'name' => $gauge->name,
+            'instrument_name' => $gauge->name,
             'type' => $gauge->type,
             'category' => $gauge->type,
             'manufacturer' => $gauge->manufacturer,
+            'make' => $gauge->manufacturer,
             'location' => $gauge->location,
+            'measuring_range' => $gauge->measuring_range,
+            'range' => $gauge->measuring_range,
+            'least_count' => $gauge->least_count,
+            'calibration_agency' => $gauge->calibration_agency,
+            'cal_agency' => $gauge->calibration_agency,
+            'certificate_number' => $latestCertificate,
+            'certificate_no' => $latestCertificate,
             'status' => $gauge->status,
+            'calibration_status' => $gauge->calibration_status,
+            'cal_status' => $this->formatCalibrationStatusLabel($gauge),
             'last_calibration_date' => $gauge->last_calibration_date?->format('Y-m-d'),
+            'cal_date' => $gauge->last_calibration_date?->format('Y-m-d'),
+            'calibration_trigger_date' => $triggerDate?->format('Y-m-d'),
+            'trigger_date' => $triggerDate?->format('Y-m-d'),
             'next_calibration_date' => $gauge->next_calibration_date?->format('Y-m-d'),
             'next_due_date' => $gauge->next_calibration_date?->format('Y-m-d'),
+            'cal_due_date' => $gauge->next_calibration_date?->format('Y-m-d'),
             'interval_months' => $this->intervalMonthsFor($gauge),
+            'calibration_frequency_months' => $this->intervalMonthsFor($gauge),
+            'cal_freq' => $this->intervalMonthsFor($gauge),
             'calibrations' => $gauge->calibrations
                 ->sortByDesc('calibration_date')
                 ->values()
@@ -235,13 +378,38 @@ class GaugeController extends Controller
 
     private function intervalMonthsFor(Gauge $gauge): int
     {
-        if ($gauge->last_calibration_date === null || $gauge->next_calibration_date === null) {
-            return 12;
+        $stored = (int) ($gauge->calibration_frequency_months ?? 0);
+        if ($stored >= 1) {
+            return min(120, $stored);
         }
 
-        return max(
-            1,
-            $gauge->last_calibration_date->diffInMonths($gauge->next_calibration_date),
-        );
+        if ($gauge->last_calibration_date !== null && $gauge->next_calibration_date !== null) {
+            return max(
+                1,
+                $gauge->last_calibration_date->diffInMonths($gauge->next_calibration_date),
+            );
+        }
+
+        return 12;
+    }
+
+    private function defaultTriggerDate(Carbon $dueDate): Carbon
+    {
+        return $dueDate->copy()->subDays(30);
+    }
+
+    private function formatCalibrationStatusLabel(Gauge $gauge): string
+    {
+        if ($gauge->status === 'under_maintenance') {
+            return 'UNDER MAINTENANCE';
+        }
+
+        return match ($gauge->calibration_status) {
+            'valid' => 'VALID',
+            'failed' => 'FAILED',
+            'due_soon' => 'DUE SOON',
+            'overdue' => 'OVERDUE',
+            default => strtoupper(str_replace('_', ' ', (string) $gauge->calibration_status)),
+        };
     }
 }

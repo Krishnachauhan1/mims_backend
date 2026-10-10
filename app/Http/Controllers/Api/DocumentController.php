@@ -102,6 +102,63 @@ class DocumentController extends Controller
         return response()->json($this->format($document, $request->user()), 201);
     }
 
+    /**
+     * JSON/base64 upload — use when Hostinger ModSecurity blocks multipart POST /documents.
+     */
+    public function storeFromBase64(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'module' => 'required|string|max:100',
+            'entity_id' => 'required|string|max:255',
+            'label' => 'nullable|string|max:255',
+            'file_name' => 'required|string|max:255',
+            'file_base64' => 'required|string|max:14500000',
+            'mime_type' => 'nullable|string|max:100',
+        ]);
+
+        $originalName = basename(str_replace(["\0", '/', '\\'], '', $data['file_name']));
+        $extension = strtolower(pathinfo($originalName, PATHINFO_EXTENSION) ?: 'bin');
+        if (! in_array($extension, ['pdf', 'jpg', 'jpeg', 'png', 'webp'], true)) {
+            return response()->json(['message' => 'Only PDF or image files are allowed'], 422);
+        }
+
+        $payload = preg_replace('/\s+/', '', $data['file_base64']);
+        $raw = base64_decode((string) $payload, true);
+        if ($raw === false || $raw === '') {
+            return response()->json(['message' => 'Invalid file payload'], 422);
+        }
+
+        $maxBytes = 10240 * 1024;
+        if (strlen($raw) > $maxBytes) {
+            return response()->json(['message' => 'File too large (max 10 MB)'], 422);
+        }
+
+        $storedName = uniqid('doc_', true).'.'.$extension;
+        $path = 'documents/'.$storedName;
+        Storage::put($path, $raw);
+
+        $mime = $data['mime_type'] ?? match ($extension) {
+            'pdf' => 'application/pdf',
+            'png' => 'image/png',
+            'webp' => 'image/webp',
+            'jpg', 'jpeg' => 'image/jpeg',
+            default => 'application/octet-stream',
+        };
+
+        $document = Document::create([
+            'module' => $data['module'],
+            'entity_id' => $this->normalizeEntityId($data['module'], $data['entity_id']),
+            'label' => $data['label'] ?? $originalName,
+            'file_name' => $originalName,
+            'file_path' => $path,
+            'mime_type' => $mime,
+            'size_bytes' => strlen($raw),
+            'user_id' => $request->user()?->id,
+        ]);
+
+        return response()->json($this->format($document, $request->user()), 201);
+    }
+
     public function download(Document $document): BinaryFileResponse|JsonResponse
     {
         try {

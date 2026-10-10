@@ -31,15 +31,19 @@ class FinishedGoodController extends Controller
             $payload,
         );
 
-        return response()->json($this->format($product), 201);
+        InventoryController::syncFromFinishedGood($product->fresh());
+
+        return response()->json($this->format($product->fresh()), 201);
     }
 
     public function update(Request $request, FinishedGood $finishedGood): JsonResponse
     {
         $validated = $this->validatedPayload($request, isUpdate: true);
         $finishedGood->update($this->normalizedPayload($validated));
+        $finishedGood = $finishedGood->fresh();
+        InventoryController::syncFromFinishedGood($finishedGood);
 
-        return response()->json($this->format($finishedGood->fresh()));
+        return response()->json($this->format($finishedGood));
     }
 
     private function validatedPayload(Request $request, bool $isUpdate = false): array

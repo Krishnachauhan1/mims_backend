@@ -2,51 +2,57 @@
 
 namespace App\Console\Commands;
 
+use App\Models\Document;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
 
 class ClearProductionDataCommand extends Command
 {
     protected $signature = 'db:clear-production {--force : Skip confirmation prompt}';
 
-    protected $description = 'Delete production, inventory, check-in/check-out, PR/PO, sales orders, notifications, and logs';
+    protected $description = 'Clear PR, PO, route cards, check-in/out, production, finished goods, daily production, quality, packing queue, rejection, job work, inventory stock, gauges, notifications, and audit logs (keeps users, vendors, clients, item catalog, workflows, machinery, sales)';
 
     /**
-     * Child tables first, then parents. Keeps users, vendors, clients, workflows, machinery, items.
+     * Child tables first, then parents.
      *
      * @var list<string>
      */
     private array $tables = [
+        'packing_entries',
         'dashboard_task_materials',
         'batch_material_requests',
+        'daily_production_entries',
         'work_order_materials',
+        'rejections',
         'quality_inspections',
         'inventory_transactions',
-        'rejections',
         'finished_goods',
         'job_works',
         'production_batches',
         'work_orders',
-        'inventory_items',
         'purchase_orders',
         'purchase_requisitions',
-        'sales_orders',
-        'machinery_maintenance_logs',
-        'audit_logs',
+        'inventory_items',
+        'gauge_calibrations',
+        'gauges',
         'notifications',
+        'audit_logs',
     ];
 
     public function handle(): int
     {
         if (! $this->option('force') && ! $this->confirm(
-            'Delete all production, inventory, check-in/check-out, PR, PO, sales order, notification, and audit log data?',
+            'Delete PR, PO, route cards, check-in/out, production, finished goods, daily production, quality, rejection, job work, inventory stock, gauges, notifications, and audit logs?',
             false,
         )) {
             $this->warn('Cancelled.');
 
             return self::SUCCESS;
         }
+
+        $this->clearGaugeDocuments();
 
         Schema::disableForeignKeyConstraints();
 
@@ -66,9 +72,29 @@ class ClearProductionDataCommand extends Command
         Schema::enableForeignKeyConstraints();
 
         $this->newLine();
-        $this->info('Done. Kept users, clients, vendors, workflows, machinery, and item master catalog.');
+        $this->info('Done. Kept users, vendors, clients, item catalog (items table), workflows, machinery, and sales orders.');
 
         return self::SUCCESS;
+    }
+
+    private function clearGaugeDocuments(): void
+    {
+        if (! Schema::hasTable('documents')) {
+            return;
+        }
+
+        Document::query()
+            ->where('module', 'gauge')
+            ->each(function (Document $document): void {
+                if ($document->file_path && Storage::disk('local')->exists($document->file_path)) {
+                    Storage::disk('local')->delete($document->file_path);
+                }
+            });
+
+        $deleted = Document::query()->where('module', 'gauge')->delete();
+        if ($deleted > 0) {
+            $this->line("  cleared {$deleted} gauge document(s)");
+        }
     }
 
     private function resetOrderCounters(): void
@@ -76,6 +102,11 @@ class ClearProductionDataCommand extends Command
         if (Schema::hasTable('clients') && Schema::hasColumn('clients', 'total_orders')) {
             DB::table('clients')->update(['total_orders' => 0]);
             $this->line('  reset clients.total_orders');
+        }
+
+        if (Schema::hasTable('clients') && Schema::hasColumn('clients', 'last_order_date')) {
+            DB::table('clients')->update(['last_order_date' => null]);
+            $this->line('  reset clients.last_order_date');
         }
 
         if (Schema::hasTable('vendors') && Schema::hasColumn('vendors', 'total_orders')) {

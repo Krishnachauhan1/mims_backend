@@ -322,68 +322,133 @@ class TaskMaterialService
             $foreignKey,
         ): void {
             foreach ($materials as $line) {
-                $item = InventoryItem::query()
-                    ->lockForUpdate()
-                    ->find($line['inventory_item_id']);
-
-                if ($item === null) {
-                    throw ValidationException::withMessages([
-                        'materials' => ['Selected inventory item was not found.'],
-                    ]);
-                }
-
-                $qty = (int) $line['quantity'];
-                if ($qty < 1) {
-                    throw ValidationException::withMessages([
-                        'materials' => ['Material quantity must be at least 1.'],
-                    ]);
-                }
-
-                if ($item->quantity < $qty) {
-                    throw ValidationException::withMessages([
-                        'materials' => [
-                            "Insufficient stock for {$item->name}. Available: {$item->quantity}, requested: {$qty}.",
-                        ],
-                    ]);
-                }
-
-                $item->update([
-                    'quantity' => $item->quantity - $qty,
-                ]);
+                $this->deductInventoryLine(
+                    $line,
+                    $referenceLabel,
+                    $destination,
+                    $userId,
+                    $linkProductionBatchId,
+                    $linkWorkOrderId,
+                    $owner instanceof WorkOrder ? $owner->id : null,
+                );
 
                 if ($pivotModel !== null && $foreignKey !== null && $this->shouldCreateMaterialPivot($owner)) {
-                    $pivotModel::query()->create([
-                        $foreignKey => $owner->id,
-                        'inventory_item_id' => $item->id,
-                        'quantity' => $qty,
-                        'unit' => $item->unit,
-                    ]);
+                    $item = InventoryItem::query()->find($line['inventory_item_id']);
+                    if ($item !== null) {
+                        $pivotModel::query()->create([
+                            $foreignKey => $owner->id,
+                            'inventory_item_id' => $item->id,
+                            'quantity' => (int) $line['quantity'],
+                            'unit' => $item->unit,
+                        ]);
+                    }
                 }
-
-                $transactionData = [
-                    'type' => 'checkout',
-                    'material_name' => $item->name,
-                    'destination' => $destination,
-                    'quantity' => $qty,
-                    'unit' => $item->unit ?? 'pcs',
-                    'batch_number' => $item->batch_number,
-                    'notes' => $referenceLabel,
-                    'status' => 'completed',
-                    'user_id' => $userId,
-                ];
-
-                if (Schema::hasColumn('inventory_transactions', 'production_batch_id')) {
-                    $transactionData['production_batch_id'] = $linkProductionBatchId;
-                }
-                if (Schema::hasColumn('inventory_transactions', 'work_order_id')) {
-                    $transactionData['work_order_id'] = $linkWorkOrderId ?? ($owner instanceof WorkOrder ? $owner->id : null);
-                }
-                if (Schema::hasColumn('inventory_transactions', 'flow_source')) {
-                    $transactionData['flow_source'] = 'production';
-                }
-
-                InventoryTransaction::query()->create($transactionData);
             }
         });
+    }
+
+    /**
+     * Deduct stock and record checkout transactions (no work-order / task pivot).
+     *
+     * @param  array<int, array{inventory_item_id: int, quantity: int}>  $materials
+     */
+    public function consumeInventoryLines(
+        array $materials,
+        string $referenceLabel,
+        ?string $destination = null,
+        ?int $userId = null,
+        ?int $linkProductionBatchId = null,
+        ?int $linkWorkOrderId = null,
+    ): void {
+        if ($materials === []) {
+            return;
+        }
+
+        DB::transaction(function () use (
+            $materials,
+            $referenceLabel,
+            $destination,
+            $userId,
+            $linkProductionBatchId,
+            $linkWorkOrderId,
+        ): void {
+            foreach ($materials as $line) {
+                $this->deductInventoryLine(
+                    $line,
+                    $referenceLabel,
+                    $destination,
+                    $userId,
+                    $linkProductionBatchId,
+                    $linkWorkOrderId,
+                    $linkWorkOrderId,
+                );
+            }
+        });
+    }
+
+    /**
+     * @param  array{inventory_item_id: int, quantity: int}  $line
+     */
+    private function deductInventoryLine(
+        array $line,
+        string $referenceLabel,
+        ?string $destination,
+        ?int $userId,
+        ?int $linkProductionBatchId,
+        ?int $linkWorkOrderId,
+        ?int $transactionWorkOrderId,
+    ): void {
+        $item = InventoryItem::query()
+            ->lockForUpdate()
+            ->find($line['inventory_item_id']);
+
+        if ($item === null) {
+            throw ValidationException::withMessages([
+                'materials' => ['Selected inventory item was not found.'],
+            ]);
+        }
+
+        $qty = (int) $line['quantity'];
+        if ($qty < 1) {
+            throw ValidationException::withMessages([
+                'materials' => ['Material quantity must be at least 1.'],
+            ]);
+        }
+
+        if ($item->quantity < $qty) {
+            throw ValidationException::withMessages([
+                'materials' => [
+                    "Insufficient stock for {$item->name}. Available: {$item->quantity}, requested: {$qty}.",
+                ],
+            ]);
+        }
+
+        $item->update([
+            'quantity' => $item->quantity - $qty,
+        ]);
+
+        $transactionData = [
+            'type' => 'checkout',
+            'material_name' => $item->name,
+            'destination' => $destination,
+            'quantity' => $qty,
+            'unit' => $item->unit ?? 'pcs',
+            'batch_number' => $item->batch_number,
+            'notes' => $referenceLabel,
+            'status' => 'completed',
+            'user_id' => $userId,
+        ];
+
+        if (Schema::hasColumn('inventory_transactions', 'production_batch_id')) {
+            $transactionData['production_batch_id'] = $linkProductionBatchId;
+        }
+        if (Schema::hasColumn('inventory_transactions', 'work_order_id')) {
+            $transactionData['work_order_id'] = $transactionWorkOrderId;
+        }
+        if (Schema::hasColumn('inventory_transactions', 'flow_source')) {
+            $transactionData['flow_source'] = 'production';
+        }
+
+        InventoryTransaction::query()->create($transactionData);
     }
 }

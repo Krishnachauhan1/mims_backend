@@ -22,6 +22,43 @@ use Illuminate\Support\Facades\Log;
 
 class AppNotificationService
 {
+    /**
+     * Record alerts for API/mobile actions (including JSON requests via subdomain proxy).
+     */
+    private static function shouldDispatchNotifications(): bool
+    {
+        if (app()->runningUnitTests()) {
+            return false;
+        }
+
+        if (app()->runningInConsole()) {
+            return true;
+        }
+
+        $request = request();
+        if ($request->is('api/*')) {
+            return true;
+        }
+
+        $path = ltrim($request->path(), '/');
+        if (str_starts_with($path, 'api/')) {
+            return true;
+        }
+
+        return $request->expectsJson();
+    }
+
+    private static function isOperatorUser(User $user): bool
+    {
+        if (($user->role ?? '') === 'operator') {
+            return true;
+        }
+
+        $designation = (string) ($user->designation ?? '');
+
+        return in_array($designation, ['machine_operator', 'production_operator'], true);
+    }
+
     public static function create(
         string $title,
         string $message,
@@ -35,7 +72,7 @@ class AppNotificationService
         bool $broadcastPush = false,
         ?array $broadcastExcludeDesignations = null,
     ): void {
-        if ((! request()->is('api/*') && ! app()->runningInConsole()) || app()->runningUnitTests()) {
+        if (! self::shouldDispatchNotifications()) {
             return;
         }
 
@@ -782,7 +819,7 @@ class AppNotificationService
         string $route,
         array $extraData = [],
     ): void {
-        if ((! request()->is('api/*') && ! app()->runningInConsole()) || app()->runningUnitTests()) {
+        if (! self::shouldDispatchNotifications()) {
             return;
         }
 
@@ -848,7 +885,7 @@ class AppNotificationService
         string $route,
         array $extraData = [],
     ): void {
-        if (! request()->is('api/*') || app()->runningUnitTests()) {
+        if (! self::shouldDispatchNotifications()) {
             return;
         }
 
@@ -899,26 +936,59 @@ class AppNotificationService
         string $route,
         array $extraData = [],
     ): void {
-        self::create(
-            title: $title,
-            message: $message,
-            type: $type,
-            severity: $severity,
-            module: $module,
-            reference: $reference,
-            route: $route,
-            broadcastPush: true,
-            broadcastExcludeDesignations: ['machine_operator', 'production_operator'],
-            extraData: $extraData,
-        );
+        if (! self::shouldDispatchNotifications()) {
+            return;
+        }
 
-        app(FcmService::class)->sendToAllExceptOperators($title, $message, array_merge([
+        $payload = array_merge([
             'type' => $type,
             'severity' => $severity,
             'module' => $module,
             'reference' => $reference ?? '',
             'route' => $route,
-        ], $extraData));
+        ], $extraData);
+
+        $fcm = app(FcmService::class);
+
+        User::query()
+            ->where('is_active', true)
+            ->orderBy('id')
+            ->chunkById(100, function ($users) use (
+                $title,
+                $message,
+                $type,
+                $severity,
+                $module,
+                $reference,
+                $route,
+                $payload,
+                $fcm,
+            ): void {
+                foreach ($users as $user) {
+                    if (self::isOperatorUser($user)) {
+                        continue;
+                    }
+
+                    try {
+                        $notification = Notification::query()->create([
+                            'title' => $title,
+                            'message' => $message,
+                            'type' => $type,
+                            'severity' => $severity,
+                            'module' => $module,
+                            'reference' => $reference,
+                            'route' => $route,
+                            'user_id' => $user->id,
+                        ]);
+
+                        $fcm->sendToUser($user, $title, $message, array_merge($payload, [
+                            'notification_id' => (string) $notification->id,
+                        ]));
+                    } catch (\Throwable) {
+                        // Continue notifying other users if one fails.
+                    }
+                }
+            });
     }
 
     public static function workflowAssigned(WorkOrder $order): void

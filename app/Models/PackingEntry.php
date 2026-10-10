@@ -18,6 +18,8 @@ class PackingEntry extends Model
         'client_name',
         'quantity',
         'packed_qty',
+        'rejected_qty',
+        'hold_qty',
         'unit',
         'status',
         'inspected_by',
@@ -36,6 +38,8 @@ class PackingEntry extends Model
         return [
             'quantity' => 'integer',
             'packed_qty' => 'integer',
+            'rejected_qty' => 'integer',
+            'hold_qty' => 'integer',
             'inspected_at' => 'datetime',
             'packed_at' => 'datetime',
             'action_at' => 'datetime',

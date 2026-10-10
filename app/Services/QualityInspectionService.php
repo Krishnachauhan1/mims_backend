@@ -354,26 +354,20 @@ class QualityInspectionService
             ->where('batch_number', $inspection->batch_number)
             ->update([
                 'quantity' => $passQty,
-                'stock' => $passQty,
-                'status' => 'In Stock',
-                'warehouse' => 'Finished Goods Warehouse A',
-                'location' => 'Finished Goods Warehouse A',
-                'flow_step' => 'finished_goods',
+                'stock' => 0,
+                'status' => 'Pending Packing',
+                'warehouse' => 'Packing Queue',
+                'location' => 'Packing Queue',
+                'flow_step' => 'packing',
                 'quality_status' => $rejectedQty > 0 ? 'partial' : 'approved',
             ]);
 
-        InventoryController::releaseFinishedGoodFromQuality(
+        InventoryController::holdFinishedGoodForPacking(
             $inspection->product_name,
             $inspection->batch_number,
             $passQty,
             $inspection->unit ?? 'pcs',
         );
-
-        if ($inspection->work_order_id !== null) {
-            WorkOrder::query()
-                ->where('id', $inspection->work_order_id)
-                ->update(['supervisor_status' => 'finished_goods']);
-        }
 
         AppNotificationService::qualityInspectionPassed($inspection->fresh());
 

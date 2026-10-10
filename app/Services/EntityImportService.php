@@ -4,6 +4,9 @@ namespace App\Services;
 
 use App\Models\Client;
 use App\Models\Document;
+use App\Models\FinishedGood;
+use App\Models\Gauge;
+use App\Http\Controllers\Api\InventoryController;
 use App\Models\InventoryItem;
 use App\Models\Item;
 use App\Models\Machinery;
@@ -12,8 +15,10 @@ use App\Models\Vendor;
 use App\Models\WorkOrder;
 use App\Models\Workflow;
 use App\Services\AppNotificationService;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
 
 class EntityImportService
 {
@@ -33,6 +38,8 @@ class EntityImportService
             'items' => $this->importItems($rows),
             'work-orders' => $this->importWorkOrders($rows),
             'machinery' => $this->importMachinery($rows),
+            'gauges' => $this->importGauges($rows),
+            'finished-goods' => $this->importFinishedGoods($rows),
             default => throw new \InvalidArgumentException("Unknown entity: {$entity}"),
         };
     }
@@ -139,6 +146,44 @@ class EntityImportService
                     'status' => $machine->status ?? 'active',
                     'default_stage' => $machine->default_stage ?? '',
                     'notes' => $machine->notes ?? '',
+                ])->all(),
+            'finished-goods' => FinishedGood::query()
+                ->orderBy('batch_number')
+                ->get()
+                ->map(fn (FinishedGood $good) => [
+                    'product' => $good->product_name,
+                    'sku' => $good->sku ?? '',
+                    'batch_number' => $good->batch_number ?? '',
+                    'quantity' => $good->quantity ?? 0,
+                    'stock' => $good->stock ?? 0,
+                    'dispatched' => $good->dispatched ?? 0,
+                    'unit' => $good->unit ?? 'pcs',
+                    'location' => $good->location ?? '',
+                    'warehouse' => $good->warehouse ?? '',
+                    'status' => $good->status ?? '',
+                    'quality_status' => $good->quality_status ?? '',
+                    'production_date' => $good->production_date?->format('Y-m-d') ?? '',
+                    'pr_number' => $good->pr_number ?? '',
+                    'workflow' => $good->workflow ?? '',
+                ])->all(),
+            'gauges' => Gauge::query()
+                ->orderBy('instrument_id')
+                ->get()
+                ->map(fn (Gauge $gauge) => [
+                    'sl_no' => '',
+                    'instrument_name' => $gauge->name,
+                    'ident_no' => $gauge->instrument_id,
+                    'certificate_no' => $gauge->certificate_number ?? '',
+                    'location' => $gauge->location ?? '',
+                    'make' => $gauge->manufacturer ?? '',
+                    'range' => $gauge->measuring_range ?? '',
+                    'least_count_range' => $gauge->least_count ?? '',
+                    'cal_agency' => $gauge->calibration_agency ?? '',
+                    'cal_freq' => ($gauge->calibration_frequency_months ?? 12).' MONTHS',
+                    'cal_date' => $gauge->last_calibration_date?->format('d/m/Y') ?? '',
+                    'trigger_date' => $gauge->calibration_trigger_date?->format('d/m/Y') ?? '',
+                    'cal_due_date' => $gauge->next_calibration_date?->format('d/m/Y') ?? '',
+                    'cal_status' => strtoupper((string) ($gauge->calibration_status ?? 'valid')),
                 ])->all(),
             default => throw new \InvalidArgumentException("Unknown entity: {$entity}"),
         };
@@ -734,6 +779,413 @@ class EntityImportService
         }
 
         return $result;
+    }
+
+    /**
+     * @param  list<array<string, string>>  $rows
+     * @return array{created: int, updated: int, skipped: int, errors: list<string>}
+     */
+    private function importFinishedGoods(array $rows): array
+    {
+        $result = $this->emptyResult();
+
+        foreach ($rows as $index => $row) {
+            $line = $index + 2;
+            $product = $this->sanitizeImportField(
+                $this->rowValue($row, ['product', 'product_name', 'name']),
+            );
+            $batchNumber = $this->sanitizeImportField(
+                $this->rowValue($row, ['batch_number', 'batch', 'batch_no']),
+            );
+            if ($batchNumber === '') {
+                $batchNumber = $this->sanitizeImportField($this->rowValue($row, ['sku']));
+            }
+
+            if ($product === '' && $batchNumber === '') {
+                $result['skipped']++;
+
+                continue;
+            }
+
+            if ($product === '') {
+                $result['errors'][] = "Row {$line}: product is required";
+                $result['skipped']++;
+
+                continue;
+            }
+
+            if ($batchNumber === '') {
+                $batchNumber = $this->autoFinishedGoodBatchNumber($product);
+            }
+
+            $quantity = max(0, (int) preg_replace(
+                '/[^\d-]/',
+                '',
+                $this->rowValue($row, ['quantity', 'qty', 'q_ty', 'stock_qty']),
+            ));
+            $stockRaw = $this->rowValue($row, ['stock']);
+            $stock = $stockRaw !== ''
+                ? max(0, (int) preg_replace('/[^\d-]/', '', $stockRaw))
+                : $quantity;
+            $dispatched = max(
+                0,
+                (int) preg_replace('/[^\d-]/', '', $this->rowValue($row, ['dispatched'])),
+            );
+
+            $productionDate = $this->parseImportDate(
+                $this->rowValue($row, ['production_date', 'production date']),
+            )?->format('Y-m-d') ?? now()->toDateString();
+
+            $payload = [
+                'product_name' => $product,
+                'sku' => $this->nullable($this->sanitizeImportField($this->rowValue($row, ['sku']))),
+                'batch_number' => $batchNumber,
+                'quantity' => $quantity,
+                'stock' => $stock,
+                'dispatched' => $dispatched,
+                'unit' => $this->sanitizeImportField($this->rowValue($row, ['unit'])) ?: 'pcs',
+                'location' => $this->nullable($this->sanitizeImportField($this->rowValue($row, ['location']))),
+                'warehouse' => $this->nullable($this->sanitizeImportField($this->rowValue($row, ['warehouse']))),
+                'status' => $this->nullable($this->sanitizeImportField($this->rowValue($row, ['status'])))
+                    ?? 'In Stock',
+                'quality_status' => $this->nullable(
+                    $this->sanitizeImportField($this->rowValue($row, ['quality_status'])),
+                ) ?? 'approved',
+                'production_date' => $productionDate,
+                'pr_number' => $this->nullable($this->rowValue($row, ['pr_number'])),
+                'workflow' => $this->nullable($this->rowValue($row, ['workflow'])),
+                'flow_step' => 'finished_goods',
+            ];
+
+            $validator = Validator::make($payload, [
+                'product_name' => 'required|string|max:255',
+                'sku' => 'nullable|string|max:255',
+                'batch_number' => 'required|string|max:255',
+                'quantity' => 'nullable|integer|min:0',
+                'stock' => 'nullable|integer|min:0',
+                'dispatched' => 'nullable|integer|min:0',
+                'unit' => 'nullable|string|max:50',
+                'location' => 'nullable|string|max:255',
+                'warehouse' => 'nullable|string|max:255',
+                'status' => 'nullable|string|max:100',
+                'quality_status' => 'nullable|string|max:100',
+                'production_date' => 'nullable|date',
+                'pr_number' => 'nullable|string|max:255',
+                'workflow' => 'nullable|string|max:255',
+                'flow_step' => 'nullable|string|max:100',
+            ]);
+
+            if ($validator->fails()) {
+                $result['errors'][] = "Row {$line}: ".$validator->errors()->first();
+                $result['skipped']++;
+
+                continue;
+            }
+
+            $data = $validator->validated();
+            $data['quality_status'] = $data['quality_status'] ?? 'approved';
+            $data['status'] = $data['status'] ?? 'In Stock';
+            $existing = FinishedGood::query()
+                ->where('product_name', $product)
+                ->first();
+
+            if ($existing === null) {
+                $existing = FinishedGood::query()
+                    ->where('batch_number', $batchNumber)
+                    ->first();
+            }
+
+            try {
+                if ($existing !== null) {
+                    $existing->update($data);
+                    InventoryController::syncFromFinishedGood($existing->fresh());
+                    $result['updated']++;
+                } else {
+                    $created = FinishedGood::query()->create($data);
+                    InventoryController::syncFromFinishedGood($created->fresh());
+                    $result['created']++;
+                }
+            } catch (\Throwable $exception) {
+                $result['errors'][] = "Row {$line}: ".$exception->getMessage();
+                $result['skipped']++;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param  list<array<string, string>>  $rows
+     * @return array{created: int, updated: int, skipped: int, errors: list<string>}
+     */
+    private function autoFinishedGoodBatchNumber(string $product): string
+    {
+        $slug = Str::upper(Str::slug(trim($product), '-'));
+        $slug = Str::limit($slug, 48, '');
+
+        if ($slug === '') {
+            return 'AUTO-'.Str::upper(Str::random(10));
+        }
+
+        return 'AUTO-'.$slug;
+    }
+
+    private function sanitizeImportField(string $value): string
+    {
+        $value = trim(str_replace("\n", ' ', $value));
+        if ($value === '') {
+            return '';
+        }
+
+        $normalized = strtolower(rtrim($value, '.'));
+
+        if (in_array($normalized, [
+            'no',
+            'n/a',
+            'na',
+            'nil',
+            'null',
+            'none',
+            '-',
+            '—',
+            '___',
+            '.',
+        ], true)) {
+            return '';
+        }
+
+        return $value;
+    }
+
+    /**
+     * @param  list<array<string, string>>  $rows
+     * @return array{created: int, updated: int, skipped: int, errors: list<string>}
+     */
+    private function importGauges(array $rows): array
+    {
+        $result = $this->emptyResult();
+
+        foreach ($rows as $index => $row) {
+            $line = $index + 2;
+            $instrumentId = $this->rowValue($row, ['ident_no', 'ident_no_', 'instrument_id', 'ident']);
+            $name = $this->rowValue($row, ['instrument_name', 'name', 'instrument']);
+
+            if ($instrumentId === '' && $name === '') {
+                $result['skipped']++;
+
+                continue;
+            }
+
+            if ($this->isHeaderLikeGaugeIdent($instrumentId) || $this->isHeaderLikeGaugeIdent($name)) {
+                $result['skipped']++;
+
+                continue;
+            }
+
+            if ($instrumentId === '') {
+                $result['errors'][] = "Row {$line}: ident_no is required";
+                $result['skipped']++;
+
+                continue;
+            }
+
+            if ($name === '') {
+                $result['errors'][] = "Row {$line}: instrument_name is required";
+                $result['skipped']++;
+
+                continue;
+            }
+
+            $calStatusRaw = $this->rowValue($row, ['cal_status', 'calibration_status', 'status']);
+            [$operationalStatus, $calibrationStatus] = $this->normalizeGaugeImportStatus($calStatusRaw);
+
+            $nextDue = $this->parseImportDate(
+                $this->rowValue($row, ['cal_due_date', 'next_calibration_date', 'next_due_date']),
+            );
+            $lastCal = $this->parseImportDate(
+                $this->rowValue($row, ['cal_date', 'last_calibration_date']),
+            );
+            $trigger = $this->parseImportDate(
+                $this->rowValue($row, ['trigger_date', 'calibration_trigger_date']),
+            );
+
+            if ($trigger === null && $nextDue !== null) {
+                $trigger = $nextDue->copy()->subDays(30);
+            }
+
+            $freqMonths = $this->parseCalibrationFrequencyMonths(
+                $this->rowValue($row, ['cal_freq', 'calibration_frequency_months', 'interval_months']),
+            );
+
+            if ($freqMonths === null && $lastCal !== null && $nextDue !== null) {
+                $freqMonths = max(1, $lastCal->diffInMonths($nextDue));
+            }
+
+            $freqMonths ??= 12;
+
+            $payload = [
+                'instrument_id' => $instrumentId,
+                'name' => $name,
+                'type' => $this->nullable($this->rowValue($row, ['type', 'category'])),
+                'manufacturer' => $this->nullable($this->rowValue($row, ['make', 'manufacturer'])),
+                'location' => $this->nullable($this->rowValue($row, ['location'])),
+                'measuring_range' => $this->nullable($this->rowValue($row, ['range', 'measuring_range'])),
+                'least_count' => $this->nullableGaugeField($this->rowValue($row, [
+                    'least_count_range',
+                    'least_count',
+                    'least_count/range',
+                ])),
+                'calibration_agency' => $this->nullable($this->rowValue($row, [
+                    'cal_agency',
+                    'calibration_agency',
+                ])),
+                'calibration_frequency_months' => $freqMonths,
+                'certificate_number' => $this->nullable($this->rowValue($row, [
+                    'certificate_no',
+                    'certificate_number',
+                ])),
+                'status' => $operationalStatus,
+                'calibration_status' => $calibrationStatus,
+                'last_calibration_date' => $lastCal?->format('Y-m-d'),
+                'calibration_trigger_date' => $trigger?->format('Y-m-d'),
+                'next_calibration_date' => $nextDue?->format('Y-m-d'),
+            ];
+
+            $validator = Validator::make($payload, [
+                'instrument_id' => 'required|string|max:255',
+                'name' => 'required|string|max:255',
+                'type' => 'nullable|string|max:255',
+                'manufacturer' => 'nullable|string|max:255',
+                'location' => 'nullable|string|max:255',
+                'measuring_range' => 'nullable|string|max:255',
+                'least_count' => 'nullable|string|max:255',
+                'calibration_agency' => 'nullable|string|max:255',
+                'calibration_frequency_months' => 'nullable|integer|min:1|max:120',
+                'certificate_number' => 'nullable|string|max:255',
+                'status' => 'nullable|string|max:255',
+                'calibration_status' => 'nullable|string|max:255',
+                'last_calibration_date' => 'nullable|date',
+                'calibration_trigger_date' => 'nullable|date',
+                'next_calibration_date' => 'nullable|date',
+            ]);
+
+            if ($validator->fails()) {
+                $result['errors'][] = "Row {$line}: ".$validator->errors()->first();
+                $result['skipped']++;
+
+                continue;
+            }
+
+            $data = $validator->validated();
+            $existing = Gauge::query()->where('instrument_id', $instrumentId)->first();
+
+            if ($existing !== null) {
+                $existing->update($data);
+                $result['updated']++;
+            } else {
+                Gauge::create($data);
+                $result['created']++;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * @return array{0: string, 1: string}
+     */
+    private function normalizeGaugeImportStatus(string $raw): array
+    {
+        $normalized = strtoupper(preg_replace('/\s+/', ' ', trim(str_replace("\n", ' ', $raw))) ?? '');
+
+        if ($normalized === '' || str_contains($normalized, 'NEWLY ADDED')) {
+            return ['active', 'valid'];
+        }
+
+        if (str_contains($normalized, 'UNDER MAINTENANCE')) {
+            return ['under_maintenance', 'valid'];
+        }
+
+        $calibrationStatus = match (true) {
+            str_contains($normalized, 'OVERDUE') => 'overdue',
+            str_contains($normalized, 'DUE SOON') => 'due_soon',
+            str_contains($normalized, 'FAIL') => 'failed',
+            str_contains($normalized, 'DONE'),
+            str_contains($normalized, 'VALID') => 'valid',
+            default => 'valid',
+        };
+
+        return ['active', $calibrationStatus];
+    }
+
+    private function parseCalibrationFrequencyMonths(string $value): ?int
+    {
+        $value = trim(str_replace("\n", ' ', $value));
+        if ($value === '') {
+            return null;
+        }
+
+        if (preg_match('/(\d+)\s*YEAR/i', $value, $matches) === 1) {
+            return min(120, max(1, (int) $matches[1] * 12));
+        }
+
+        if (preg_match('/(\d+)\s*MONTH/i', $value, $matches) === 1) {
+            return min(120, max(1, (int) $matches[1]));
+        }
+
+        if (preg_match('/(\d+)/', $value, $matches) === 1) {
+            $number = (int) $matches[1];
+
+            return min(120, max(1, $number <= 10 ? $number * 12 : $number));
+        }
+
+        return null;
+    }
+
+    private function parseImportDate(string $value): ?Carbon
+    {
+        $value = trim(str_replace("\n", ' ', $value));
+        if ($value === '' || $value === '___' || $value === '-') {
+            return null;
+        }
+
+        if (is_numeric($value)) {
+            $serial = (float) $value;
+            if ($serial > 20000 && $serial < 80000) {
+                return Carbon::create(1899, 12, 30)->addDays((int) round($serial));
+            }
+        }
+
+        try {
+            return Carbon::parse($value);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private function nullableGaugeField(?string $value): ?string
+    {
+        $value = trim(str_replace("\n", ' ', (string) $value));
+        if ($value === '' || $value === '___' || $value === '-') {
+            return null;
+        }
+
+        return $value;
+    }
+
+    private function isHeaderLikeGaugeIdent(string $value): bool
+    {
+        $normalized = strtolower(trim(str_replace("\n", ' ', $value)));
+
+        return in_array($normalized, [
+            'ident_no',
+            'ident. no.',
+            'ident no',
+            'instrument_name',
+            'instrument name',
+            'sl_no',
+            'sl no',
+        ], true);
     }
 
     /**

@@ -28,6 +28,7 @@ class UserDeviceTokenController extends Controller
         );
 
         return response()->json([
+            'success' => true,
             'id' => $record->id,
             'token' => $record->token,
         ], 201);

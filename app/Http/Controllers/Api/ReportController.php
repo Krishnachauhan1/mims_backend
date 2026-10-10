@@ -55,7 +55,8 @@ class ReportController extends Controller
     private function buildMachineActiveWorkPayload(Request $request): array
     {
         $batchStageMachine = app(BatchStageMachineService::class);
-        $includeOnHold = filter_var($request->query('include_on_hold', false), FILTER_VALIDATE_BOOL);
+        // On-hold route cards stay visible on the machine floor at the stage where hold was applied.
+        $includeOnHold = filter_var($request->query('include_on_hold', true), FILTER_VALIDATE_BOOL);
         $machineFilter = $request->filled('machine_id')
             ? (int) $request->query('machine_id')
             : null;
@@ -75,6 +76,7 @@ class ReportController extends Controller
         }
 
         $batches = $batchQuery->get();
+        $batchesById = $batches->keyBy('id')->all();
 
         $workOrdersById = $this->workOrdersForBatches($batches);
 
@@ -113,8 +115,9 @@ class ReportController extends Controller
 
         foreach ($batches as $batch) {
             try {
-                $currentStage = $batchStageMachine->currentStageForBatch(
+                $currentStage = $this->resolveMachineFloorStage(
                     $batch,
+                    $batchStageMachine,
                     $workOrdersById,
                 );
             } catch (\Throwable $e) {
@@ -154,6 +157,8 @@ class ReportController extends Controller
             $rows[] = $unassigned;
         }
 
+        $this->markCurrentlyWorkingJobsOnMachines($rows, $batchesById);
+
         if ($machineFilter !== null) {
             $rows = array_values(array_filter(
                 $rows,
@@ -164,6 +169,17 @@ class ReportController extends Controller
         $busyCount = collect($machineRows)->where('is_busy', true)->count();
         $totalJobs = (int) collect($rows)->sum('active_job_count');
         $totalQty = (int) collect($rows)->sum('active_quantity');
+        $onHoldJobs = 0;
+        foreach ($rows as $row) {
+            foreach ($row['jobs'] ?? [] as $job) {
+                if (! is_array($job)) {
+                    continue;
+                }
+                if (strtolower((string) ($job['status'] ?? '')) === 'on_hold') {
+                    $onHoldJobs++;
+                }
+            }
+        }
 
         return [
             'summary' => [
@@ -172,10 +188,61 @@ class ReportController extends Controller
                 'idle_machines' => max(0, $machines->count() - $busyCount),
                 'total_active_jobs' => $totalJobs,
                 'total_active_quantity' => $totalQty,
+                'on_hold_jobs' => $onHoldJobs,
                 'generated_at' => now()->format('Y-m-d H:i'),
             ],
             'machines' => $rows,
         ];
+    }
+
+    /**
+     * @param  array<int, WorkOrder>  $workOrdersById
+     * @return array<string, mixed>|null
+     */
+    private function resolveMachineFloorStage(
+        ProductionBatch $batch,
+        BatchStageMachineService $batchStageMachine,
+        array $workOrdersById,
+    ): ?array {
+        if (strtolower(trim((string) ($batch->status ?? ''))) !== 'on_hold') {
+            return $batchStageMachine->currentStageForBatch($batch, $workOrdersById);
+        }
+
+        $stages = $batchStageMachine->resolveStagesForBatch($batch, $workOrdersById);
+        if ($stages === []) {
+            return $batchStageMachine->currentStageForBatch($batch, $workOrdersById);
+        }
+
+        $stageName = trim((string) ($batch->current_stage ?? ''));
+        $history = array_values($batch->stage_history ?? []);
+        for ($index = count($history) - 1; $index >= 0; $index--) {
+            $entry = $history[$index];
+            if (! is_array($entry)) {
+                continue;
+            }
+            $completedRaw = $entry['completed'] ?? $entry['completed_at'] ?? null;
+            $isOpen = $completedRaw === null
+                || (is_string($completedRaw) && trim($completedRaw) === '');
+            if (! $isOpen) {
+                continue;
+            }
+            $fromHistory = trim((string) ($entry['stage'] ?? ''));
+            if ($fromHistory !== '') {
+                $stageName = $fromHistory;
+            }
+            break;
+        }
+
+        if ($stageName !== '') {
+            foreach ($stages as $stage) {
+                $name = trim((string) ($stage['name'] ?? ''));
+                if ($name !== '' && strcasecmp($name, $stageName) === 0) {
+                    return $stage;
+                }
+            }
+        }
+
+        return $batchStageMachine->currentStageForBatch($batch, $workOrdersById);
     }
 
     /**
@@ -226,13 +293,30 @@ class ReportController extends Controller
         }
         $routeCard ??= $batch->workflow?->name;
 
+        $itemCode = $workOrder?->item_code;
+        $itemName = $workOrder?->item_name;
+        if ($itemName === null || trim((string) $itemName) === '') {
+            $itemName = filled($itemCode)
+                ? (string) $itemCode
+                : (string) ($batch->product_name ?: 'Product');
+        }
+
+        $stageLabel = trim((string) ($batch->current_stage ?? ''));
+        if ($stageLabel === '') {
+            $stageLabel = trim((string) ($currentStage['name'] ?? '—'));
+        }
+        $isOnHold = strtolower(trim((string) ($batch->status ?? ''))) === 'on_hold';
+
         return [
             'batch_id' => (int) $batch->id,
             'batch_number' => (string) $batch->batch_number,
             'product_name' => (string) ($batch->product_name ?: 'Product'),
+            'item_name' => (string) $itemName,
+            'item_code' => $itemCode !== null ? (string) $itemCode : null,
             'quantity' => (int) $batch->quantity,
             'unit' => $batch->unit,
-            'current_stage' => (string) ($batch->current_stage ?? ($currentStage['name'] ?? '—')),
+            'current_stage' => $stageLabel !== '' ? $stageLabel : '—',
+            'hold_stage' => $isOnHold ? $stageLabel : null,
             'stage_order' => (int) ($batch->stage_order ?? 1),
             'total_stages' => (int) ($batch->total_stages ?? 1),
             'status' => (string) ($batch->status ?? 'in_progress'),
@@ -249,7 +333,153 @@ class ReportController extends Controller
             'machine_name' => $currentStage['machine_name'] ?? null,
             'machine_code' => $currentStage['machine_code'] ?? null,
             'is_job_work_stage' => (bool) ($currentStage['is_job_work'] ?? false),
+            'is_currently_working' => false,
+            'is_on_hold' => $isOnHold,
         ];
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $machineRows
+     * @param  array<int, ProductionBatch>  $batchesById
+     */
+    private function markCurrentlyWorkingJobsOnMachines(array &$machineRows, array $batchesById): void
+    {
+        foreach ($machineRows as &$row) {
+            $jobs = $row['jobs'] ?? [];
+            if (! is_array($jobs) || $jobs === []) {
+                continue;
+            }
+
+            $currentBatchId = null;
+            $currentStartedAt = null;
+
+            foreach ($jobs as $index => $job) {
+                if (! is_array($job)) {
+                    continue;
+                }
+
+                $batchId = (int) ($job['batch_id'] ?? 0);
+                $batch = $batchesById[$batchId] ?? null;
+                $stageName = (string) ($job['current_stage'] ?? '');
+                $activelyRunning = $batch !== null
+                    && $this->isBatchActivelyRunningOnStage($batch, $stageName);
+
+                $jobs[$index]['is_actively_running'] = $activelyRunning;
+
+                if (! $activelyRunning) {
+                    continue;
+                }
+
+                $startedAt = $this->batchActiveStageStartedAt($batch);
+                if ($currentStartedAt === null || ($startedAt !== null && $startedAt->gt($currentStartedAt))) {
+                    $currentStartedAt = $startedAt;
+                    $currentBatchId = $batchId;
+                }
+            }
+
+            if ($currentBatchId === null) {
+                foreach ($jobs as $index => $job) {
+                    if (! is_array($job)) {
+                        continue;
+                    }
+                    if (strtolower((string) ($job['status'] ?? '')) === 'on_hold') {
+                        continue;
+                    }
+                    $batchId = (int) ($job['batch_id'] ?? 0);
+                    $batch = $batchesById[$batchId] ?? null;
+                    if ($batch === null) {
+                        continue;
+                    }
+                    $startedAt = $batch->stage_started_at ?? $batch->started_at;
+                    if ($startedAt === null) {
+                        continue;
+                    }
+                    if ($currentStartedAt === null || $startedAt->gt($currentStartedAt)) {
+                        $currentStartedAt = $startedAt;
+                        $currentBatchId = $batchId;
+                    }
+                }
+            }
+
+            foreach ($jobs as $index => $job) {
+                if (! is_array($job)) {
+                    continue;
+                }
+                $batchId = (int) ($job['batch_id'] ?? 0);
+                $jobs[$index]['is_currently_working'] = $currentBatchId !== null
+                    && $batchId === $currentBatchId;
+            }
+
+            $row['jobs'] = $jobs;
+            $row['current_batch_id'] = $currentBatchId;
+        }
+        unset($row);
+    }
+
+    private function isBatchActivelyRunningOnStage(ProductionBatch $batch, string $stageName): bool
+    {
+        if (strtolower(trim((string) ($batch->status ?? ''))) === 'on_hold') {
+            return false;
+        }
+
+        $history = array_values($batch->stage_history ?? []);
+        if ($history === []) {
+            return strtolower(trim((string) ($batch->status ?? ''))) === 'in_progress';
+        }
+
+        for ($index = count($history) - 1; $index >= 0; $index--) {
+            $entry = $history[$index];
+            if (! is_array($entry)) {
+                continue;
+            }
+
+            $completedRaw = $entry['completed'] ?? $entry['completed_at'] ?? null;
+            $isOpen = $completedRaw === null
+                || (is_string($completedRaw) && trim($completedRaw) === '');
+
+            if (! $isOpen) {
+                continue;
+            }
+
+            $entryStage = trim((string) ($entry['stage'] ?? ''));
+            $currentStage = trim($stageName !== '' ? $stageName : (string) ($batch->current_stage ?? ''));
+
+            if ($entryStage === '' || $currentStage === ''
+                || strcasecmp($entryStage, $currentStage) === 0) {
+                return true;
+            }
+
+            return false;
+        }
+
+        return false;
+    }
+
+    private function batchActiveStageStartedAt(ProductionBatch $batch): ?Carbon
+    {
+        $history = array_values($batch->stage_history ?? []);
+        for ($index = count($history) - 1; $index >= 0; $index--) {
+            $entry = $history[$index];
+            if (! is_array($entry)) {
+                continue;
+            }
+
+            $completedRaw = $entry['completed'] ?? $entry['completed_at'] ?? null;
+            $isOpen = $completedRaw === null
+                || (is_string($completedRaw) && trim($completedRaw) === '');
+
+            if (! $isOpen) {
+                continue;
+            }
+
+            $started = $this->safeReportDateTime($entry['started'] ?? $entry['started_at'] ?? null);
+
+            return $started !== null ? Carbon::parse($started) : null;
+        }
+
+        $fallback = $batch->stage_started_at ?? $batch->started_at;
+
+        return $fallback instanceof Carbon ? $fallback : ($fallback ? Carbon::parse($fallback) : null);
     }
 
     private function safeReportDateTime(mixed $value): ?string

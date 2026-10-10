@@ -12,7 +12,8 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 class ImportExportController extends Controller
 {
     private const ENTITIES = [
-        'users', 'vendors', 'clients', 'inventory', 'items', 'work-orders', 'machinery',
+        'users', 'vendors', 'clients', 'inventory', 'items', 'work-orders', 'machinery', 'gauges',
+        'finished-goods',
     ];
 
     public function __construct(
