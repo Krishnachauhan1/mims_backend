@@ -69,18 +69,27 @@ return new class extends Migration
     private function rebuildSqliteQualityInspectionsTable(): void
     {
         if (Schema::hasColumn('quality_inspections', 'source_type')) {
-            if (Schema::hasTable('quality_inspections_old')) {
-                Schema::drop('quality_inspections_old');
-            }
+            Schema::dropIfExists('quality_inspections_old');
 
             return;
         }
 
-        if (Schema::hasTable('quality_inspections_old')) {
+        // Resume failed run: table already renamed, new table missing or partial.
+        if (! Schema::hasTable('quality_inspections_old') && Schema::hasTable('quality_inspections')) {
+            Schema::rename('quality_inspections', 'quality_inspections_old');
+        }
+
+        if (Schema::hasTable('quality_inspections')) {
             Schema::drop('quality_inspections');
         }
 
-        Schema::rename('quality_inspections', 'quality_inspections_old');
+        if (! Schema::hasTable('quality_inspections_old')) {
+            return;
+        }
+
+        // SQLite index names are global; renamed table keeps old index names.
+        DB::statement('DROP INDEX IF EXISTS quality_inspections_status_created_at_index');
+        DB::statement('DROP INDEX IF EXISTS quality_inspections_batch_number_index');
 
         Schema::create('quality_inspections', function (Blueprint $table) {
             $table->id();
