@@ -17,7 +17,18 @@ ACTION="${1:-full}"
 SSH_HOST="${SSH_HOST:-145.79.58.104}"
 SSH_USERNAME="${SSH_USERNAME:-u683672103}"
 SSH_PORT="${SSH_PORT:-65002}"
-REMOTE_DIR="${REMOTE_DIR:-domains/powerforceindustries.com/public_html}"
+REMOTE_DIR="${REMOTE_DIR-}"
+
+normalize_remote_dir() {
+  REMOTE_DIR="$(printf '%s' "${REMOTE_DIR}" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [ -z "$REMOTE_DIR" ]; then
+    REMOTE_DIR="domains/powerforceindustries.com/public_html"
+  elif [ "$REMOTE_DIR" = "public_html" ]; then
+    REMOTE_DIR="domains/powerforceindustries.com/public_html"
+  fi
+}
+
+normalize_remote_dir
 
 if [ "$SSH_PORT" = "21" ]; then
   echo "==> SSH_PORT was 21 (FTP). Using Hostinger SSH port 65002." >&2
@@ -80,8 +91,12 @@ TAR_EXCLUDES=(
 )
 
 do_sync_tar() {
+  normalize_remote_dir
+  local remote_quoted
+  remote_quoted=$(printf '%s' "$REMOTE_DIR" | sed "s/'/'\\\\''/g")
   echo "==> Upload (tar+ssh) → ~/${REMOTE_DIR}/"
-  tar -czf - "${TAR_EXCLUDES[@]}" -C "$ROOT" . | ssh_cmd "mkdir -p ~/${REMOTE_DIR} && cd ~/${REMOTE_DIR} && tar -xzf -"
+  ssh_cmd "mkdir -p '~/${remote_quoted}'"
+  tar -czf - "${TAR_EXCLUDES[@]}" -C "$ROOT" . | ssh_cmd "tar -xzf - -C '~/${remote_quoted}'"
 }
 
 do_sync_rsync() {
