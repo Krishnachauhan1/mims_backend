@@ -99,32 +99,18 @@ jobs:
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           SSH_PORT: ${{ secrets.SSH_PORT || env.SSH_PORT }}
           REMOTE_DIR: ${{ secrets.SSH_REMOTE_DIR || env.SSH_REMOTE_DIR }}
+          RSYNC_RSH: ssh -i ~/.ssh/id_deploy -p ${{ secrets.SSH_PORT || env.SSH_PORT }} -o StrictHostKeyChecking=accept-new
         run: bash deploy/ci-hostinger.sh sync
 
       - name: Composer, migrate, cache on server
-        uses: appleboy/ssh-action@v1.2.2
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT || env.SSH_PORT }}
-          command_timeout: 15m
-          script: |
-            set -e
-            cd ~/${{ secrets.SSH_REMOTE_DIR || env.SSH_REMOTE_DIR }}
-            if command -v composer >/dev/null 2>&1; then
-              composer install --no-dev --optimize-autoloader --no-interaction --no-scripts
-            else
-              echo "Composer not in PATH — ensure vendor/ exists on server"
-            fi
-            php artisan migrate --force --no-interaction
-            php artisan optimize:clear --no-interaction
-            echo "=== API health ==="
-            curl -4 -sf -H "Accept: application/json" https://powerforceindustries.com/api/health | head -c 200 || true
-            echo ""
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
+          SSH_PORT: ${{ secrets.SSH_PORT || env.SSH_PORT }}
+          RSYNC_RSH: ssh -i ~/.ssh/id_deploy -p ${{ secrets.SSH_PORT || env.SSH_PORT }} -o StrictHostKeyChecking=accept-new
+        run: bash deploy/ci-hostinger.sh postdeploy
 
       - name: Verify live health endpoint
         run: |
