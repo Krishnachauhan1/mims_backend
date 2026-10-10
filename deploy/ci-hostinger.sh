@@ -64,6 +64,7 @@ RSYNC_EXCLUDES=(
   --exclude 'storage/framework/views/*'
   --exclude '.DS_Store'
   --exclude 'public/hot'
+  --exclude 'bootstrap/cache/*.php'
 )
 
 do_sync() {
@@ -77,11 +78,14 @@ do_postdeploy() {
   ssh_cmd bash -s <<ENDSSH
 set -e
 cd ~/${REMOTE_DIR}
+# Never use Mac/dev bootstrap cache on production (Pail, Pao, etc.).
+rm -f bootstrap/cache/packages.php bootstrap/cache/services.php bootstrap/cache/config.php
 if command -v composer >/dev/null 2>&1; then
   composer install --no-dev --optimize-autoloader --no-interaction --no-scripts
 else
   echo "Composer not in PATH — using existing vendor/ on server"
 fi
+php artisan package:discover --ansi --no-interaction
 php artisan migrate --force --no-interaction
 php artisan optimize:clear --no-interaction
 echo ""
