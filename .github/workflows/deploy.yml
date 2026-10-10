@@ -33,7 +33,7 @@ concurrency:
 env:
   SSH_PORT: "65002"
   SSH_REMOTE_DIR: domains/powerforceindustries.com/public_html
-  PHP_VERSION: "8.3"
+  PHP_VERSION: "8.4"
 
 jobs:
   quality:
