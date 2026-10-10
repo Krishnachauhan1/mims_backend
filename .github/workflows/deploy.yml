@@ -1,21 +1,20 @@
 # Deploy Laravel API → https://powerforceindustries.com/api
 #
-# Repo: https://github.com/Krishnachauhan1/mims_backend
+# Repo: https://github.com/Krishanchauhan1/mims_backend
 #
-# Required secrets (Settings → Secrets and variables → Actions):
-#   SSH_HOST          — 145.79.58.104
-#   SSH_USERNAME      — u683672103
-#   SSH_PRIVATE_KEY   — ed25519 deploy key (full PEM, including BEGIN/END lines)
-#   SSH_PASSWORD      — optional; only if you cannot use a key (see deploy/ci-hostinger.sh)
+# Deploy uses SSH (port 65002), not FTP. FTP secrets are only aliases for host/user/password.
 #
-# Optional secrets (defaults below work for Power Force Hostinger):
-#   SSH_PORT          — default 65002
-#   SSH_REMOTE_DIR    — default domains/powerforceindustries.com/public_html
+# Set ONE auth method:
+#   A) SSH_PRIVATE_KEY — deploy key (recommended for CI)
+#   B) SSH_PASSWORD or FTP_PASSWORD — same password you use for: ssh -p 65002 u683672103@145.79.58.104
 #
-# One-time: add the deploy public key to the server (~/.ssh/authorized_keys):
-#   ssh-keygen -t ed25519 -C "github-mims-backend" -f ~/.ssh/mims_github_deploy -N ""
-#   cat ~/.ssh/mims_github_deploy.pub   # paste on server
-#   # GitHub secret SSH_PRIVATE_KEY = contents of mims_github_deploy (private)
+# Host / user (any one naming works):
+#   SSH_HOST or FTP_SERVER     — 145.79.58.104  (ftp:// prefix is stripped)
+#   SSH_USERNAME or FTP_USERNAME — u683672103
+#
+# Optional:
+#   SSH_PORT         — default 65002 (not FTP port 21)
+#   SSH_REMOTE_DIR   — default domains/powerforceindustries.com/public_html
 
 name: Backend CI/CD (Hostinger)
 
@@ -80,36 +79,71 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup SSH
+      - name: Configure SSH for deploy
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
+          FTP_SERVER: ${{ secrets.FTP_SERVER }}
+          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
           SSH_PORT: ${{ secrets.SSH_PORT || env.SSH_PORT }}
         run: |
-          if [ -z "$SSH_PRIVATE_KEY" ]; then
-            echo "::error::SSH_PRIVATE_KEY secret is not set. See workflow header comments."
+          set -e
+          HOST="${SSH_HOST:-$FTP_SERVER}"
+          HOST="${HOST#ftp://}"
+          HOST="${HOST#http://}"
+          HOST="${HOST#https://}"
+          USER="${SSH_USERNAME:-$FTP_USERNAME}"
+          PASS="${SSH_PASSWORD:-$FTP_PASSWORD}"
+
+          if [ -z "$HOST" ] || [ -z "$USER" ]; then
+            echo "::error::Set SSH_HOST + SSH_USERNAME (or FTP_SERVER + FTP_USERNAME)."
             exit 1
           fi
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
-          chmod 600 ~/.ssh/id_deploy
-          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+          echo "DEPLOY_HOST=$HOST" >> "$GITHUB_ENV"
+          echo "DEPLOY_USER=$USER" >> "$GITHUB_ENV"
+          echo "DEPLOY_PORT=$SSH_PORT" >> "$GITHUB_ENV"
+
+          ssh-keyscan -p "$SSH_PORT" "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+          if [ -n "$SSH_PRIVATE_KEY" ]; then
+            mkdir -p ~/.ssh
+            printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
+            chmod 600 ~/.ssh/id_deploy
+            echo "DEPLOY_RSYNC_RSH=ssh -i ~/.ssh/id_deploy -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
+            echo "Using SSH key authentication."
+          elif [ -n "$PASS" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq sshpass
+            echo "DEPLOY_SSHPASS=$PASS" >> "$GITHUB_ENV"
+            echo "DEPLOY_RSYNC_RSH=sshpass -e ssh -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
+            echo "Using SSH password authentication."
+          else
+            echo "::error::Set SSH_PRIVATE_KEY or SSH_PASSWORD (or FTP_PASSWORD if same as SSH login)."
+            exit 1
+          fi
 
       - name: Rsync application (no vendor / .env)
         env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
-          SSH_PORT: ${{ secrets.SSH_PORT || env.SSH_PORT }}
+          SSH_HOST: ${{ env.DEPLOY_HOST }}
+          SSH_USERNAME: ${{ env.DEPLOY_USER }}
+          SSH_PORT: ${{ env.DEPLOY_PORT }}
           REMOTE_DIR: ${{ secrets.SSH_REMOTE_DIR || env.SSH_REMOTE_DIR }}
-          RSYNC_RSH: ssh -i ~/.ssh/id_deploy -p ${{ secrets.SSH_PORT || env.SSH_PORT }} -o StrictHostKeyChecking=accept-new
+          RSYNC_RSH: ${{ env.DEPLOY_RSYNC_RSH }}
+          SSHPASS: ${{ env.DEPLOY_SSHPASS }}
         run: bash deploy/ci-hostinger.sh sync
 
       - name: Composer, migrate, cache on server
         env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
-          SSH_PORT: ${{ secrets.SSH_PORT || env.SSH_PORT }}
-          RSYNC_RSH: ssh -i ~/.ssh/id_deploy -p ${{ secrets.SSH_PORT || env.SSH_PORT }} -o StrictHostKeyChecking=accept-new
+          SSH_HOST: ${{ env.DEPLOY_HOST }}
+          SSH_USERNAME: ${{ env.DEPLOY_USER }}
+          SSH_PORT: ${{ env.DEPLOY_PORT }}
+          REMOTE_DIR: ${{ secrets.SSH_REMOTE_DIR || env.SSH_REMOTE_DIR }}
+          RSYNC_RSH: ${{ env.DEPLOY_RSYNC_RSH }}
+          SSHPASS: ${{ env.DEPLOY_SSHPASS }}
         run: bash deploy/ci-hostinger.sh postdeploy
 
       - name: Verify live health endpoint
