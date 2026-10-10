@@ -1,0 +1,132 @@
+# Deploy Laravel API → https://powerforceindustries.com/api
+#
+# Repo: https://github.com/Krishnachauhan1/mims_backend
+#
+# Required secrets (Settings → Secrets and variables → Actions):
+#   SSH_HOST          — 145.79.58.104
+#   SSH_USERNAME      — u683672103
+#   SSH_PRIVATE_KEY   — ed25519 deploy key (full PEM, including BEGIN/END lines)
+#   SSH_PASSWORD      — optional; only if you cannot use a key (see deploy/ci-hostinger.sh)
+#
+# Optional secrets (defaults below work for Power Force Hostinger):
+#   SSH_PORT          — default 65002
+#   SSH_REMOTE_DIR    — default domains/powerforceindustries.com/public_html
+#
+# One-time: add the deploy public key to the server (~/.ssh/authorized_keys):
+#   ssh-keygen -t ed25519 -C "github-mims-backend" -f ~/.ssh/mims_github_deploy -N ""
+#   cat ~/.ssh/mims_github_deploy.pub   # paste on server
+#   # GitHub secret SSH_PRIVATE_KEY = contents of mims_github_deploy (private)
+
+name: Backend CI/CD (Hostinger)
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: backend-hostinger-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SSH_PORT: "65002"
+  SSH_REMOTE_DIR: domains/powerforceindustries.com/public_html
+  PHP_VERSION: "8.3"
+
+jobs:
+  quality:
+    name: Composer & Laravel smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: mbstring, xml, ctype, curl, zip, sqlite3, pdo_sqlite, bcmath, fileinfo
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Validate composer.json
+        run: composer validate --strict
+
+      - name: Prepare app key
+        run: |
+          cp .env.example .env
+          php artisan key:generate --force
+
+      - name: Migrate (sqlite) & route list
+        run: |
+          php artisan migrate --force --no-interaction
+          php artisan route:list --no-interaction
+
+  deploy:
+    name: Deploy to Hostinger
+    needs: quality
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_PORT: ${{ secrets.SSH_PORT || env.SSH_PORT }}
+        run: |
+          if [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "::error::SSH_PRIVATE_KEY secret is not set. See workflow header comments."
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Rsync application (no vendor / .env)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_PORT: ${{ secrets.SSH_PORT || env.SSH_PORT }}
+          REMOTE_DIR: ${{ secrets.SSH_REMOTE_DIR || env.SSH_REMOTE_DIR }}
+        run: bash deploy/ci-hostinger.sh sync
+
+      - name: Composer, migrate, cache on server
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || env.SSH_PORT }}
+          command_timeout: 15m
+          script: |
+            set -e
+            cd ~/${{ secrets.SSH_REMOTE_DIR || env.SSH_REMOTE_DIR }}
+            if command -v composer >/dev/null 2>&1; then
+              composer install --no-dev --optimize-autoloader --no-interaction --no-scripts
+            else
+              echo "Composer not in PATH — ensure vendor/ exists on server"
+            fi
+            php artisan migrate --force --no-interaction
+            php artisan optimize:clear --no-interaction
+            echo "=== API health ==="
+            curl -4 -sf -H "Accept: application/json" https://powerforceindustries.com/api/health | head -c 200 || true
+            echo ""
+
+      - name: Verify live health endpoint
+        run: |
+          sleep 3
+          curl -4 -sf -H "Accept: application/json" https://powerforceindustries.com/api/health
