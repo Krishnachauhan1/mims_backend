@@ -7,6 +7,7 @@ use App\Models\FinishedGood;
 use App\Models\InventoryItem;
 use App\Services\CatalogInventorySyncService;
 use App\Services\InventoryCostService;
+use App\Support\InventoryStockStatus;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -85,7 +86,9 @@ class InventoryController extends Controller
 
     public function update(Request $request, InventoryItem $inventory): JsonResponse
     {
-        $inventory->update($this->validatedPayload($request, $inventory));
+        $inventory->fill($this->validatedPayload($request, $inventory));
+        $inventory->status = InventoryStockStatus::forItem($inventory);
+        $inventory->save();
 
         return response()->json($this->format($inventory->fresh(), app(InventoryCostService::class)));
     }
@@ -98,9 +101,9 @@ class InventoryController extends Controller
         ]);
 
         $previous = (int) $inventory->quantity;
-        $inventory->update([
-            'quantity' => max(0, $previous + (int) $data['quantity']),
-        ]);
+        $inventory->quantity = max(0, $previous + (int) $data['quantity']);
+        $inventory->status = InventoryStockStatus::forItem($inventory);
+        $inventory->save();
 
         return response()->json([
             'success' => true,
@@ -483,7 +486,7 @@ class InventoryController extends Controller
             'name' => $item->name,
             'sku' => $item->sku,
             'type' => $item->type,
-            'status' => $item->status,
+            'status' => InventoryStockStatus::forItem($item),
             'quantity' => $item->quantity,
             'unit' => $item->unit,
             'batch_number' => $item->batch_number,

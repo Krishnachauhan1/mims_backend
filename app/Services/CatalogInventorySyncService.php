@@ -2,6 +2,8 @@
 
 namespace App\Services;
 
+use App\Support\InventoryStockStatus;
+
 use App\Models\InventoryItem;
 use App\Models\Item;
 use Illuminate\Support\Collection;
@@ -138,17 +140,19 @@ class CatalogInventorySyncService
             $description = null;
         }
 
+        $minStock = max(0, (int) ($item->min_stock_alert ?? 0));
+
         return [
             'id' => -1 * (int) $item->id,
             'name' => $this->inventoryDisplayName($item),
             'sku' => filled($item->code) ? (string) $item->code : 'ITEM-'.$item->id,
             'type' => $type,
-            'status' => 'available',
+            'status' => InventoryStockStatus::resolve(0, $minStock, 'available'),
             'quantity' => 0,
             'unit' => $item->unit ?: ($type === 'raw_material' ? 'kg' : 'pcs'),
             'batch_number' => null,
             'location' => null,
-            'min_stock' => max(0, (int) ($item->min_stock_alert ?? 0)),
+            'min_stock' => $minStock,
             'item_id' => $item->id,
             'item_code' => filled($item->code) ? (string) $item->code : null,
             'description' => $description,
