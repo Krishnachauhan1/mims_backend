@@ -224,9 +224,10 @@ class ProductionController extends Controller
                     );
                 }
 
-                return response()->json(
-                    $this->advancePartialForward($batch, $moveQty, $request->user()),
-                );
+                return response()->json([
+                    'success' => true,
+                    'data' => $this->advancePartialForward($batch, $moveQty, $request->user()),
+                ]);
             }
         }
 
