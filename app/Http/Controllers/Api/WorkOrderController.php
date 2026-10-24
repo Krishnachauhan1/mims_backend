@@ -289,6 +289,11 @@ class WorkOrderController extends Controller
             ], $validated));
         }
 
+        $preserveBatchQuantities = $this->workOrderHasActiveQuantitySplits($workOrder);
+        if ($preserveBatchQuantities) {
+            unset($validated['quantity']);
+        }
+
         $workOrder->update([
             ...$validated,
             'stages' => $stages,
@@ -319,7 +324,11 @@ class WorkOrderController extends Controller
             }
         }
 
-        if (array_key_exists('quantity', $validated) && $validated['quantity'] !== null) {
+        if (
+            ! $preserveBatchQuantities
+            && array_key_exists('quantity', $validated)
+            && $validated['quantity'] !== null
+        ) {
             $plannedQty = max(1, (int) $validated['quantity']);
             ProductionBatch::query()
                 ->where('work_order_id', $workOrder->id)
@@ -848,6 +857,47 @@ class WorkOrderController extends Controller
      * @param  array<string, mixed>  $validated
      * @return array<string, mixed>
      */
+    /**
+     * Partial forward creates multiple active batches on one route card — route edits
+     * must not overwrite each line's quantity with the work order total.
+     */
+    private function workOrderHasActiveQuantitySplits(WorkOrder $workOrder): bool
+    {
+        $activeBatchIds = ProductionBatch::query()
+            ->where('work_order_id', $workOrder->id)
+            ->where('status', '!=', 'completed')
+            ->pluck('id');
+
+        if ($activeBatchIds->count() > 1) {
+            return true;
+        }
+
+        if ($activeBatchIds->isEmpty()) {
+            return false;
+        }
+
+        $batchId = (int) $activeBatchIds->first();
+
+        if (
+            Schema::hasColumn('production_batches', 'parent_batch_id')
+            && ProductionBatch::query()
+                ->where('id', $batchId)
+                ->whereNotNull('parent_batch_id')
+                ->exists()
+        ) {
+            return true;
+        }
+
+        if (Schema::hasColumn('production_batches', 'parent_batch_id')) {
+            return ProductionBatch::query()
+                ->where('parent_batch_id', $batchId)
+                ->where('status', '!=', 'completed')
+                ->exists();
+        }
+
+        return false;
+    }
+
     private function filterWorkOrderAttributes(array $validated): array
     {
         if (! $this->priorityColumnExists()) {
