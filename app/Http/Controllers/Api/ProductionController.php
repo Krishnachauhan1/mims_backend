@@ -35,32 +35,38 @@ class ProductionController extends Controller
         private MaterialSpecResolver $materialSpec,
         private InventoryStockAllocationService $stockAllocation,
     ) {}
-    public function batches(): JsonResponse
+    public function batches(Request $request): JsonResponse
     {
         $payload = [];
         $failedIds = [];
-        $ids = DB::table('production_batches')->orderByDesc('id')->pluck('id');
+
+        $query = ProductionBatch::query()
+            ->with(['workflow', 'workOrder'])
+            ->orderByDesc('id');
+
+        if ($request->boolean('active_only')) {
+            $query->where('status', '!=', 'completed');
+        }
+
+        $batches = $query->get();
 
         Log::info('[API][production/batches] start', [
             'user_id' => auth()->id(),
-            'batch_count' => $ids->count(),
+            'batch_count' => $batches->count(),
+            'active_only' => $request->boolean('active_only'),
         ]);
 
-        foreach ($ids as $id) {
+        foreach ($batches as $batch) {
             try {
-                $batch = ProductionBatch::with(['workflow', 'workOrder'])->find($id);
-                if ($batch === null) {
-                    continue;
-                }
                 $payload[] = $this->format($batch);
             } catch (\Throwable $e) {
                 report($e);
-                $failedIds[] = (int) $id;
+                $failedIds[] = (int) $batch->id;
                 Log::warning('[API][production/batches] format failed', [
-                    'batch_id' => (int) $id,
+                    'batch_id' => (int) $batch->id,
                     'error' => $e->getMessage(),
                 ]);
-                $fallback = $this->formatBatchFallback((int) $id);
+                $fallback = $this->formatBatchFallback((int) $batch->id);
                 if ($fallback !== null) {
                     $payload[] = $fallback;
                 }
