@@ -666,20 +666,7 @@ class JobWorkFlowService
      */
     public function resolveStagesForBatch(ProductionBatch $batch): array
     {
-        if ($batch->work_order_id) {
-            $order = WorkOrder::query()->find($batch->work_order_id);
-            $orderStages = $order?->stages ?? [];
-            if (is_array($orderStages) && $orderStages !== []) {
-                return $this->sortStages($orderStages);
-            }
-        }
-
-        $workflowStages = $batch->workflow?->stages ?? [];
-        if (is_array($workflowStages) && $workflowStages !== []) {
-            return $this->sortStages($workflowStages);
-        }
-
-        return [];
+        return \App\Support\BatchRouteStages::resolveForBatch($batch);
     }
 
     /**

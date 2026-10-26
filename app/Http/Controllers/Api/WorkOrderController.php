@@ -226,13 +226,6 @@ class WorkOrderController extends Controller
 
     public function updateRoute(Request $request, WorkOrder $workOrder): JsonResponse
     {
-        if (! in_array($workOrder->supervisor_status, ['draft', 'pending', 'wip', 'rejection'], true)) {
-            return response()->json(
-                ['message' => 'This route card cannot be edited in its current status'],
-                422,
-            );
-        }
-
         $validated = $request->validate([
             'workflow_id' => 'nullable|integer',
             'workflow_name' => 'nullable|string|max:255',
@@ -244,6 +237,7 @@ class WorkOrderController extends Controller
             'unit' => 'nullable|string|max:50',
             'route_card_no' => 'nullable|string|max:255',
             'quantity' => 'nullable|integer|min:1',
+            'work_order_quantity' => 'nullable|integer|min:1',
             'remarks' => 'nullable|string|max:2000',
             'priority' => 'nullable|string|in:normal,urgent',
             'updated_by' => 'nullable|string|max:255',
@@ -262,6 +256,7 @@ class WorkOrderController extends Controller
             'materials.*.quantity' => 'required|integer|min:1',
             'materials.*.grade' => 'nullable|string|max:50',
             'materials.*.diameter_mm' => 'nullable|numeric|min:0',
+            'production_batch_id' => 'nullable|integer|exists:production_batches,id',
         ]);
 
         $stages = $this->normalizeStages($validated['stages']);
@@ -271,8 +266,26 @@ class WorkOrderController extends Controller
             ], 422);
         }
 
+        $targetBatchId = isset($validated['production_batch_id'])
+            ? (int) $validated['production_batch_id']
+            : null;
+
+        if ($blocked = $this->rejectRouteEditUnlessAllowed($workOrder, $targetBatchId)) {
+            return $blocked;
+        }
+
         $materials = $validated['materials'] ?? [];
-        unset($validated['materials'], $validated['stages']);
+        unset($validated['materials'], $validated['stages'], $validated['production_batch_id']);
+
+        if ($targetBatchId !== null && $targetBatchId > 0) {
+            return $this->updateRouteForProductionBatch($workOrder, $targetBatchId, $stages, $validated);
+        }
+
+        if ($this->workOrderHasActiveQuantitySplits($workOrder)) {
+            return response()->json([
+                'message' => 'This route card has split movement lines. Open Edit Route on the main line or split line (WO-… / WO-…-P1) in Product Movement.',
+            ], 422);
+        }
 
         if (array_key_exists('route_card_no', $validated) && blank($validated['route_card_no'])) {
             unset($validated['route_card_no']);
@@ -344,7 +357,7 @@ class WorkOrderController extends Controller
             $workOrder->load(['materials.inventoryItem']);
         }
 
-        if (in_array($workOrder->supervisor_status, ['wip', 'rejection'], true)) {
+        if (in_array($workOrder->supervisor_status, ['wip', 'rejection', 'quality_check'], true)) {
             $stageCount = count($stages);
             ProductionBatch::query()
                 ->where('work_order_id', $workOrder->id)
@@ -857,6 +870,105 @@ class WorkOrderController extends Controller
      * @param  array<string, mixed>  $validated
      * @return array<string, mixed>
      */
+    private function rejectRouteEditUnlessAllowed(
+        WorkOrder $workOrder,
+        ?int $batchId,
+    ): ?JsonResponse {
+        $status = (string) ($workOrder->supervisor_status ?? 'pending');
+        $allowedWorkOrder = ['draft', 'pending', 'wip', 'rejection', 'quality_check'];
+        if (in_array($status, $allowedWorkOrder, true)) {
+            return null;
+        }
+
+        if ($batchId !== null && $batchId > 0) {
+            $batch = ProductionBatch::query()->find($batchId);
+            if (
+                $batch !== null
+                && (int) $batch->work_order_id === (int) $workOrder->id
+                && $batch->status !== 'completed'
+            ) {
+                return null;
+            }
+        }
+
+        return response()->json(
+            ['message' => 'This route card cannot be edited in its current status'],
+            422,
+        );
+    }
+
+    /**
+     * @param  array<string, mixed>  $validated
+     */
+    private function updateRouteForProductionBatch(
+        WorkOrder $workOrder,
+        int $batchId,
+        array $stages,
+        array $validated,
+    ): JsonResponse {
+        $batch = ProductionBatch::query()->findOrFail($batchId);
+        if ((int) $batch->work_order_id !== (int) $workOrder->id) {
+            return response()->json([
+                'message' => 'This movement line does not belong to the route card.',
+            ], 422);
+        }
+
+        if ($batch->status === 'completed') {
+            return response()->json([
+                'message' => 'Completed movement lines cannot be edited.',
+            ], 422);
+        }
+
+        if (! Schema::hasColumn('production_batches', 'route_stages')) {
+            return response()->json([
+                'message' => 'Server migration required: route_stages on production_batches.',
+            ], 503);
+        }
+
+        $stageCount = count($stages);
+        $stageOrder = max(1, min((int) $batch->stage_order, $stageCount));
+        $currentStage = $stages[$stageOrder - 1]['name'] ?? $batch->current_stage;
+
+        $batchUpdates = [
+            'route_stages' => $stages,
+            'total_stages' => $stageCount,
+            'stage_order' => $stageOrder,
+            'current_stage_index' => $stageOrder - 1,
+            'current_stage' => $currentStage,
+        ];
+
+        if (array_key_exists('quantity', $validated) && $validated['quantity'] !== null) {
+            $batchUpdates['quantity'] = max(1, (int) $validated['quantity']);
+        }
+
+        $batch->update($batchUpdates);
+
+        if (
+            array_key_exists('work_order_quantity', $validated)
+            && $validated['work_order_quantity'] !== null
+        ) {
+            $workOrder->update([
+                'quantity' => max(1, (int) $validated['work_order_quantity']),
+            ]);
+        }
+
+        if ($this->priorityColumnExists() && isset($validated['priority'])) {
+            $batch->update(['priority' => $validated['priority']]);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Route updated for '.$batch->batch_number,
+            'data' => [
+                'work_order' => $this->format($workOrder->fresh(
+                    $this->materialsTableExists() ? ['materials.inventoryItem'] : [],
+                )),
+                'production_batch_id' => $batch->id,
+                'batch_number' => $batch->batch_number,
+            ],
+        ]);
+    }
+
     /**
      * Partial forward creates multiple active batches on one route card — route edits
      * must not overwrite each line's quantity with the work order total.

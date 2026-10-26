@@ -298,6 +298,8 @@ class ProductionController extends Controller
             'time' => $now,
         ]];
 
+        $routeStagesSnapshot = \App\Support\BatchRouteStages::resolveForBatch($batch);
+
         $splitBatch = ProductionBatch::create([
             'batch_number' => $this->nextSplitBatchNumber($batch),
             'product_name' => $batch->product_name,
@@ -305,7 +307,8 @@ class ProductionController extends Controller
             'current_stage' => $nextStageName,
             'current_stage_index' => $nextStageOrder - 1,
             'stage_order' => $nextStageOrder,
-            'total_stages' => $batch->total_stages,
+            'total_stages' => max(count($routeStagesSnapshot), (int) $batch->total_stages),
+            'route_stages' => $routeStagesSnapshot !== [] ? $routeStagesSnapshot : null,
             'quantity' => $quantity,
             'status' => $batch->status === 'on_hold' ? 'in_progress' : $batch->status,
             'started_at' => $batch->started_at,
@@ -1084,22 +1087,7 @@ class ProductionController extends Controller
      */
     private function resolveStagesForBatch(ProductionBatch $batch): array
     {
-        $stages = [];
-
-        if ($batch->work_order_id) {
-            $order = WorkOrder::query()->find($batch->work_order_id);
-            $orderStages = $order?->stages ?? [];
-            if (is_array($orderStages) && $orderStages !== []) {
-                $stages = $orderStages;
-            }
-        }
-
-        if ($stages === []) {
-            $workflowStages = $batch->workflow?->stages ?? [];
-            if (is_array($workflowStages) && $workflowStages !== []) {
-                $stages = $workflowStages;
-            }
-        }
+        $stages = \App\Support\BatchRouteStages::resolveForBatch($batch);
 
         if ($stages === []) {
             return [];

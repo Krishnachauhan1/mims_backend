@@ -16,6 +16,7 @@ class ProductionBatch extends Model
         'current_stage_index',
         'stage_order',
         'total_stages',
+        'route_stages',
         'quantity',
         'status',
         'priority',
@@ -55,6 +56,7 @@ class ProductionBatch extends Model
             'last_completion_reminder_at' => 'datetime',
             'stage_history' => 'array',
             'activity_log' => 'array',
+            'route_stages' => 'array',
         ];
     }
 
