@@ -227,6 +227,7 @@
         Route::post('/production/batches/{batch}/delete', [ProductionController::class, 'destroyBatch']);
         Route::put('/production/batches/{batch}/status', [ProductionController::class, 'updateStatus']);
         Route::put('/production/batches/{batch}/priority', [ProductionController::class, 'updatePriority']);
+        Route::put('/production/batches/{batch}/route', [WorkOrderController::class, 'updateMovementLineRoute']);
         Route::post('/production/advance-stage', [ProductionController::class, 'advanceStage']);
         Route::post('/production/send-job-work', [ProductionController::class, 'sendForJobWork']);
         Route::post('/production/receive-job-work', [ProductionController::class, 'receiveJobWorkReturn']);

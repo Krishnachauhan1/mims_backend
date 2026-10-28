@@ -224,6 +224,58 @@ class WorkOrderController extends Controller
         )));
     }
 
+    /**
+     * Edit machines/qty for one Product Movement line — ignores route-card supervisor status.
+     */
+    public function updateMovementLineRoute(
+        Request $request,
+        ProductionBatch $batch,
+    ): JsonResponse {
+        if ($batch->status === 'completed') {
+            return response()->json([
+                'message' => 'Completed movement lines cannot be edited.',
+            ], 422);
+        }
+
+        $workOrder = $batch->workOrder;
+        if ($workOrder === null) {
+            return response()->json([
+                'message' => 'This movement line is not linked to a route card.',
+            ], 422);
+        }
+
+        $validated = $request->validate([
+            'quantity' => 'nullable|integer|min:1',
+            'work_order_quantity' => 'nullable|integer|min:1',
+            'priority' => 'nullable|string|in:normal,urgent',
+            'updated_by' => 'nullable|string|max:255',
+            'stages' => 'required|array|min:1',
+            'stages.*.name' => 'nullable|string|max:255',
+            'stages.*.order' => 'nullable|integer|min:1',
+            'stages.*.machine_id' => 'nullable|integer',
+            'stages.*.machine_name' => 'nullable|string|max:255',
+            'stages.*.machine_code' => 'nullable|string|max:255',
+            'stages.*.is_job_work' => 'nullable|boolean',
+            'stages.*.vendor_id' => 'nullable|integer',
+            'stages.*.vendor_name' => 'nullable|string|max:255',
+            'stages.*.rate' => 'nullable|numeric|min:0',
+        ]);
+
+        $stages = $this->normalizeStages($validated['stages']);
+        if ($stages === []) {
+            return response()->json([
+                'message' => 'Add at least one machine stage with a name',
+            ], 422);
+        }
+
+        return $this->updateRouteForProductionBatch(
+            $workOrder,
+            (int) $batch->id,
+            $stages,
+            $validated,
+        );
+    }
+
     public function updateRoute(Request $request, WorkOrder $workOrder): JsonResponse
     {
         $validated = $request->validate([
