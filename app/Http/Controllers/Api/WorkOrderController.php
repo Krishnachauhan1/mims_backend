@@ -874,21 +874,43 @@ class WorkOrderController extends Controller
         WorkOrder $workOrder,
         ?int $batchId,
     ): ?JsonResponse {
-        $status = (string) ($workOrder->supervisor_status ?? 'pending');
-        $allowedWorkOrder = ['draft', 'pending', 'wip', 'rejection', 'quality_check'];
-        if (in_array($status, $allowedWorkOrder, true)) {
+        // Product Movement saves with production_batch_id — allow any active line
+        // even when the route card status is finished_goods / quality_check, etc.
+        if ($batchId !== null && $batchId > 0) {
+            $batch = ProductionBatch::query()->find($batchId);
+            if ($batch === null) {
+                return response()->json(
+                    ['message' => 'Movement line not found. Refresh and try again.'],
+                    422,
+                );
+            }
+            if ((int) $batch->work_order_id !== (int) $workOrder->id) {
+                return response()->json(
+                    ['message' => 'This movement line does not belong to the route card.'],
+                    422,
+                );
+            }
+            if ($batch->status === 'completed') {
+                return response()->json(
+                    ['message' => 'Completed movement lines cannot be edited.'],
+                    422,
+                );
+            }
+
             return null;
         }
 
-        if ($batchId !== null && $batchId > 0) {
-            $batch = ProductionBatch::query()->find($batchId);
-            if (
-                $batch !== null
-                && (int) $batch->work_order_id === (int) $workOrder->id
-                && $batch->status !== 'completed'
-            ) {
-                return null;
-            }
+        $status = (string) ($workOrder->supervisor_status ?? 'pending');
+        $allowedWorkOrder = [
+            'draft',
+            'pending',
+            'wip',
+            'rejection',
+            'quality_check',
+            'finished_goods',
+        ];
+        if (in_array($status, $allowedWorkOrder, true)) {
+            return null;
         }
 
         return response()->json(
