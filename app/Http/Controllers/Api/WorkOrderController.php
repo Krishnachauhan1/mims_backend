@@ -257,6 +257,7 @@ class WorkOrderController extends Controller
             'materials.*.grade' => 'nullable|string|max:50',
             'materials.*.diameter_mm' => 'nullable|numeric|min:0',
             'production_batch_id' => 'nullable|integer|exists:production_batches,id',
+            'batch_number' => 'nullable|string|max:255',
         ]);
 
         $stages = $this->normalizeStages($validated['stages']);
@@ -266,16 +267,26 @@ class WorkOrderController extends Controller
             ], 422);
         }
 
-        $targetBatchId = isset($validated['production_batch_id'])
-            ? (int) $validated['production_batch_id']
-            : null;
+        $targetBatchId = $this->resolveRouteEditBatchId($workOrder, $validated);
+
+        $batchNumberHint = trim((string) ($validated['batch_number'] ?? ''));
+        if ($batchNumberHint !== '' && ($targetBatchId === null || $targetBatchId <= 0)) {
+            return response()->json([
+                'message' => "Movement line {$batchNumberHint} was not found on this route card.",
+            ], 422);
+        }
 
         if ($blocked = $this->rejectRouteEditUnlessAllowed($workOrder, $targetBatchId)) {
             return $blocked;
         }
 
         $materials = $validated['materials'] ?? [];
-        unset($validated['materials'], $validated['stages'], $validated['production_batch_id']);
+        unset(
+            $validated['materials'],
+            $validated['stages'],
+            $validated['production_batch_id'],
+            $validated['batch_number'],
+        );
 
         if ($targetBatchId !== null && $targetBatchId > 0) {
             return $this->updateRouteForProductionBatch($workOrder, $targetBatchId, $stages, $validated);
@@ -870,6 +881,32 @@ class WorkOrderController extends Controller
      * @param  array<string, mixed>  $validated
      * @return array<string, mixed>
      */
+    /**
+     * @param  array<string, mixed>  $validated
+     */
+    private function resolveRouteEditBatchId(WorkOrder $workOrder, array $validated): ?int
+    {
+        $batchId = isset($validated['production_batch_id'])
+            ? (int) $validated['production_batch_id']
+            : 0;
+
+        if ($batchId > 0) {
+            return $batchId;
+        }
+
+        $batchNumber = trim((string) ($validated['batch_number'] ?? ''));
+        if ($batchNumber === '') {
+            return null;
+        }
+
+        $resolved = ProductionBatch::query()
+            ->where('work_order_id', $workOrder->id)
+            ->where('batch_number', $batchNumber)
+            ->value('id');
+
+        return $resolved !== null ? (int) $resolved : null;
+    }
+
     private function rejectRouteEditUnlessAllowed(
         WorkOrder $workOrder,
         ?int $batchId,
