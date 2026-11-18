@@ -255,6 +255,7 @@ class MaterialRequisitionController extends Controller
             'issued_at' => $row->issued_at?->format('Y-m-d H:i'),
             'review_notes' => $row->review_notes,
             'created_at' => $row->created_at?->format('Y-m-d H:i'),
+            'requested_at' => $row->created_at?->format('Y-m-d H:i'),
             'stock_available' => $inventory !== null ? (int) $inventory->quantity : null,
             'inventory_sku' => $inventory?->sku,
         ];

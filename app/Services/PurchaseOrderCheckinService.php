@@ -61,16 +61,13 @@ class PurchaseOrderCheckinService
                 'status' => $phase,
             ];
 
-            if (! filled($existing->mrn_number)) {
-                $updates['mrn_number'] = $this->mrnNumbers->nextMrnNumber();
-            }
-
             $existing->update($updates);
+            $this->mrnNumbers->ensureMrnWhenReceived($existing->fresh());
 
             return;
         }
 
-        InventoryTransaction::query()->create([
+        $created = InventoryTransaction::query()->create([
             'type' => 'checkin',
             'po_number' => $po->po_number,
             'flow_source' => 'purchase_order',
@@ -80,11 +77,11 @@ class PurchaseOrderCheckinService
             'unit' => 'mixed',
             'batch_number' => $po->po_number,
             'pr_number' => $po->pr_number,
-            'mrn_number' => $this->mrnNumbers->nextMrnNumber(),
             'items' => $items,
             'notes' => 'Awaiting material arrival from approved PO',
             'status' => 'order_placed',
             'receipt_phase' => 'order_placed',
         ]);
+        $this->mrnNumbers->ensureMrnWhenReceived($created->fresh());
     }
 }

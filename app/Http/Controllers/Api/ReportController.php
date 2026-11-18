@@ -5,20 +5,30 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Client;
 use App\Models\FinishedGood;
+use App\Models\Item;
+use App\Models\BatchMaterialRequest;
 use App\Models\InventoryItem;
+use App\Models\InventoryTransaction;
+use App\Models\MaterialRequisition;
+use App\Models\WorkOrderMaterial;
 use App\Models\Machinery;
+use App\Models\PackingEntry;
 use App\Models\ProductionBatch;
 use App\Models\PurchaseOrder;
+use App\Models\QualityInspection;
 use App\Models\Rejection;
+use App\Support\DisplayValue;
 use App\Models\SalesOrder;
 use App\Models\Vendor;
 use App\Models\WorkOrder;
 use App\Services\BatchStageMachineService;
+use App\Services\SpreadsheetService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ReportController extends Controller
 {
@@ -49,6 +59,1682 @@ class ReportController extends Controller
         }
     }
 
+    public function machineProcessingHistory(Request $request): JsonResponse
+    {
+        try {
+            return response()->json($this->buildMachineProcessingHistoryPayload($request));
+        } catch (\Throwable $e) {
+            report($e);
+            Log::error('[API][reports/machine-processing-history] failed', [
+                'message' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            ]);
+
+            return response()->json([
+                'message' => 'Failed to load machine processing history',
+                'summary' => [
+                    'total_machines' => 0,
+                    'total_events' => 0,
+                    'generated_at' => now()->format('Y-m-d H:i'),
+                ],
+                'machines' => [],
+            ], 500);
+        }
+    }
+
+    public function machineProcessingHistoryExport(Request $request): StreamedResponse|JsonResponse
+    {
+        try {
+            $payload = $this->buildMachineProcessingHistoryPayload($request);
+            $rows = $this->flattenMachineProcessingHistoryForExport(
+                $payload['machines'] ?? [],
+            );
+
+            if ($rows === []) {
+                return response()->json(['message' => 'No processing records to export'], 422);
+            }
+
+            $headers = [
+                'Machine Code',
+                'Machine Name',
+                'Machine Type',
+                'Location',
+                'Batch',
+                'Route Card',
+                'Item Code',
+                'Item / Product',
+                'Grade',
+                'Diameter (mm)',
+                'Stage',
+                'Quantity',
+                'Unit',
+                'Started At',
+                'Processed At',
+                'Duration',
+                'Operator',
+                'Batch Status',
+                'In Progress',
+            ];
+
+            $filename = 'machine_processing_history_'.now()->format('Y-m-d_His').'.xlsx';
+
+            return app(SpreadsheetService::class)->xlsxDownload($filename, $headers, $rows);
+        } catch (\Throwable $e) {
+            report($e);
+            Log::error('[API][reports/machine-processing-history/export] failed', [
+                'message' => $e->getMessage(),
+            ]);
+
+            return response()->json(['message' => 'Failed to export machine processing history'], 500);
+        }
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $machines
+     * @return array<int, array<string, string>>
+     */
+    private function flattenMachineProcessingHistoryForExport(array $machines): array
+    {
+        $rows = [];
+
+        foreach ($machines as $machine) {
+            if (! is_array($machine)) {
+                continue;
+            }
+
+            $machineCode = (string) ($machine['machine_code'] ?? '');
+            $machineName = (string) ($machine['machine_name'] ?? '');
+            $machineType = (string) ($machine['type'] ?? '');
+            $location = (string) ($machine['location'] ?? '');
+            $events = $machine['events'] ?? [];
+
+            if (! is_array($events)) {
+                continue;
+            }
+
+            foreach ($events as $event) {
+                if (! is_array($event)) {
+                    continue;
+                }
+
+                $inProgress = ($event['in_progress'] ?? false) === true
+                    && ($event['batch_completed'] ?? false) !== true;
+
+                $rows[] = [
+                    'Machine Code' => $machineCode,
+                    'Machine Name' => $machineName,
+                    'Machine Type' => $machineType,
+                    'Location' => $location,
+                    'Batch' => (string) ($event['batch_number'] ?? ''),
+                    'Route Card' => (string) ($event['route_card'] ?? ''),
+                    'Item Code' => (string) ($event['item_code'] ?? ''),
+                    'Item / Product' => (string) ($event['item_name'] ?? $event['product_name'] ?? ''),
+                    'Grade' => (string) ($event['grade'] ?? ''),
+                    'Diameter (mm)' => $event['diameter_mm'] !== null
+                        ? (string) $event['diameter_mm']
+                        : '',
+                    'Stage' => (string) ($event['stage'] ?? ''),
+                    'Quantity' => (string) ($event['quantity'] ?? ''),
+                    'Unit' => (string) ($event['unit'] ?? 'pcs'),
+                    'Started At' => (string) ($event['started_at'] ?? ''),
+                    'Processed At' => (string) ($event['processed_at'] ?? ''),
+                    'Duration' => (string) ($event['duration'] ?? ''),
+                    'Operator' => (string) ($event['operator'] ?? ''),
+                    'Batch Status' => (string) ($event['batch_status'] ?? ''),
+                    'In Progress' => $inProgress ? 'Yes' : 'No',
+                ];
+            }
+        }
+
+        return $rows;
+    }
+
+    public function itemProductionHistory(Request $request): JsonResponse
+    {
+        try {
+            $itemCode = trim($request->string('item_code')->toString());
+            if ($itemCode === '') {
+                return response()->json(['message' => 'Item code is required'], 422);
+            }
+
+            return response()->json($this->buildItemProductionHistoryPayload($itemCode));
+        } catch (\Throwable $e) {
+            report($e);
+            Log::error('[API][reports/item-production-history] failed', [
+                'message' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'message' => 'Failed to load item production history',
+                'summary' => [
+                    'item_code' => trim($request->string('item_code')->toString()),
+                    'made_count' => 0,
+                    'in_production_count' => 0,
+                    'generated_at' => now()->format('Y-m-d H:i'),
+                ],
+                'made_history' => [],
+                'in_production' => [],
+            ], 500);
+        }
+    }
+
+    public function itemProductionHistoryExport(Request $request): StreamedResponse|JsonResponse
+    {
+        try {
+            $itemCode = trim($request->string('item_code')->toString());
+            if ($itemCode === '') {
+                return response()->json(['message' => 'Item code is required'], 422);
+            }
+
+            $payload = $this->buildItemProductionHistoryPayload($itemCode);
+            $rows = $this->flattenItemProductionHistoryForExport($payload);
+
+            if ($rows === []) {
+                return response()->json(['message' => 'No production records to export'], 422);
+            }
+
+            $headers = [
+                'Section',
+                'Item Code',
+                'Item Name',
+                'Batch',
+                'Route Card',
+                'Quantity',
+                'Unit',
+                'Status',
+                'Current Stage',
+                'Machine',
+                'Machine Code',
+                'Stage Order',
+                'Total Stages',
+                'Event At',
+                'Started At',
+                'Reference',
+            ];
+
+            $safeCode = preg_replace('/[^a-zA-Z0-9_-]+/', '_', $itemCode) ?: 'item';
+            $filename = 'item_production_history_'.$safeCode.'_'.now()->format('Y-m-d_His').'.xlsx';
+
+            return app(SpreadsheetService::class)->xlsxDownload($filename, $headers, $rows);
+        } catch (\Throwable $e) {
+            report($e);
+            Log::error('[API][reports/item-production-history/export] failed', [
+                'message' => $e->getMessage(),
+            ]);
+
+            return response()->json(['message' => 'Failed to export item production history'], 500);
+        }
+    }
+
+    public function rawMaterialHistory(Request $request): JsonResponse
+    {
+        try {
+            $materialCode = trim($request->string('material_code')->toString());
+            if ($materialCode === '') {
+                return response()->json(['message' => 'Material code or SKU is required'], 422);
+            }
+
+            return response()->json($this->buildRawMaterialHistoryPayload($materialCode));
+        } catch (\Throwable $e) {
+            report($e);
+            Log::error('[API][reports/raw-material-history] failed', [
+                'message' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'message' => 'Failed to load raw material history',
+                'summary' => [
+                    'material_code' => trim($request->string('material_code')->toString()),
+                    'received_count' => 0,
+                    'in_use_count' => 0,
+                    'stock_quantity' => 0,
+                    'generated_at' => now()->format('Y-m-d H:i'),
+                ],
+                'received_history' => [],
+                'in_use' => [],
+            ], 500);
+        }
+    }
+
+    public function rawMaterialHistoryExport(Request $request): StreamedResponse|JsonResponse
+    {
+        try {
+            $materialCode = trim($request->string('material_code')->toString());
+            if ($materialCode === '') {
+                return response()->json(['message' => 'Material code or SKU is required'], 422);
+            }
+
+            $payload = $this->buildRawMaterialHistoryPayload($materialCode);
+            $rows = $this->flattenRawMaterialHistoryForExport($payload);
+
+            if ($rows === []) {
+                return response()->json(['message' => 'No raw material records to export'], 422);
+            }
+
+            $headers = [
+                'Section',
+                'Material',
+                'SKU',
+                'Kind',
+                'Location',
+                'Quantity',
+                'Unit',
+                'Status',
+                'Event At',
+                'PO Number',
+                'MRN Number',
+                'Supplier',
+                'Check-in ID',
+                'Reference',
+            ];
+
+            $safeCode = preg_replace('/[^a-zA-Z0-9_-]+/', '_', $materialCode) ?: 'material';
+            $filename = 'raw_material_history_'.$safeCode.'_'.now()->format('Y-m-d_His').'.xlsx';
+
+            return app(SpreadsheetService::class)->xlsxDownload($filename, $headers, $rows);
+        } catch (\Throwable $e) {
+            report($e);
+            Log::error('[API][reports/raw-material-history/export] failed', [
+                'message' => $e->getMessage(),
+            ]);
+
+            return response()->json(['message' => 'Failed to export raw material history'], 500);
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<int, array<string, string>>
+     */
+    private function flattenItemProductionHistoryForExport(array $payload): array
+    {
+        $summary = is_array($payload['summary'] ?? null) ? $payload['summary'] : [];
+        $itemCode = (string) ($summary['item_code'] ?? '');
+        $itemName = (string) ($summary['item_name'] ?? '');
+
+        $rows = [];
+
+        foreach ($payload['made_history'] ?? [] as $entry) {
+            if (! is_array($entry)) {
+                continue;
+            }
+            $rows[] = [
+                'Section' => 'Production completed',
+                'Item Code' => $itemCode,
+                'Item Name' => $itemName,
+                'Batch' => (string) ($entry['batch_number'] ?? ''),
+                'Route Card' => (string) ($entry['route_card_no'] ?? ''),
+                'Quantity' => (string) ($entry['quantity'] ?? ''),
+                'Unit' => (string) ($entry['unit'] ?? ''),
+                'Status' => 'completed',
+                'Current Stage' => '',
+                'Machine' => '',
+                'Machine Code' => '',
+                'Stage Order' => '',
+                'Total Stages' => '',
+                'Event At' => (string) ($entry['made_at'] ?? ''),
+                'Started At' => (string) ($entry['started_at'] ?? ''),
+                'Reference' => '',
+            ];
+        }
+
+        foreach ($payload['in_production'] ?? [] as $entry) {
+            if (! is_array($entry)) {
+                continue;
+            }
+            $rows[] = [
+                'Section' => 'Currently in production',
+                'Item Code' => $itemCode,
+                'Item Name' => $itemName,
+                'Batch' => (string) ($entry['batch_number'] ?? ''),
+                'Route Card' => (string) ($entry['route_card_no'] ?? ''),
+                'Quantity' => (string) ($entry['quantity'] ?? ''),
+                'Unit' => (string) ($entry['unit'] ?? ''),
+                'Status' => (string) ($entry['status'] ?? ''),
+                'Current Stage' => (string) ($entry['current_stage'] ?? ''),
+                'Machine' => (string) ($entry['machine_name'] ?? ''),
+                'Machine Code' => (string) ($entry['machine_code'] ?? ''),
+                'Stage Order' => (string) ($entry['stage_order'] ?? ''),
+                'Total Stages' => (string) ($entry['total_stages'] ?? ''),
+                'Event At' => (string) ($entry['stage_started_at'] ?? $entry['started_at'] ?? ''),
+                'Started At' => (string) ($entry['started_at'] ?? ''),
+                'Reference' => '',
+            ];
+        }
+
+        return $rows;
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<int, array<string, string>>
+     */
+    private function flattenRawMaterialHistoryForExport(array $payload): array
+    {
+        $summary = is_array($payload['summary'] ?? null) ? $payload['summary'] : [];
+        $materialName = (string) ($summary['material_name'] ?? $summary['material_code'] ?? '');
+        $sku = (string) ($summary['material_sku'] ?? $summary['material_code'] ?? '');
+
+        $rows = [];
+
+        foreach ($payload['received_history'] ?? [] as $entry) {
+            if (! is_array($entry)) {
+                continue;
+            }
+            $rows[] = [
+                'Section' => 'Received',
+                'Material' => $materialName,
+                'SKU' => $sku,
+                'Kind' => '',
+                'Location' => (string) ($entry['item_name'] ?? ''),
+                'Quantity' => (string) ($entry['quantity'] ?? ''),
+                'Unit' => (string) ($entry['unit'] ?? ''),
+                'Status' => 'received',
+                'Event At' => (string) ($entry['received_at'] ?? ''),
+                'PO Number' => (string) ($entry['po_number'] ?? ''),
+                'MRN Number' => (string) ($entry['mrn_number'] ?? ''),
+                'Supplier' => (string) ($entry['supplier'] ?? ''),
+                'Check-in ID' => (string) ($entry['checkin_id'] ?? ''),
+                'Reference' => '',
+            ];
+        }
+
+        foreach ($payload['in_use'] ?? [] as $entry) {
+            if (! is_array($entry)) {
+                continue;
+            }
+            $rows[] = [
+                'Section' => 'Currently in use',
+                'Material' => $materialName,
+                'SKU' => $sku,
+                'Kind' => (string) ($entry['kind'] ?? ''),
+                'Location' => (string) ($entry['location'] ?? ''),
+                'Quantity' => (string) ($entry['quantity'] ?? ''),
+                'Unit' => (string) ($entry['unit'] ?? ''),
+                'Status' => (string) ($entry['status'] ?? ''),
+                'Event At' => (string) ($entry['since_at'] ?? ''),
+                'PO Number' => '',
+                'MRN Number' => '',
+                'Supplier' => '',
+                'Check-in ID' => '',
+                'Reference' => (string) ($entry['reference'] ?? ''),
+            ];
+        }
+
+        return $rows;
+    }
+
+    public function clientProductionHistory(Request $request): JsonResponse
+    {
+        try {
+            $clientQuery = trim($request->string('client_query')->toString());
+            if ($clientQuery === '') {
+                return response()->json(['message' => 'Client name is required'], 422);
+            }
+
+            return response()->json($this->buildClientProductionHistoryPayload($clientQuery));
+        } catch (\Throwable $e) {
+            report($e);
+            Log::error('[API][reports/client-production-history] failed', [
+                'message' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'message' => 'Failed to load client production history',
+                'summary' => [
+                    'client_query' => trim($request->string('client_query')->toString()),
+                    'product_count' => 0,
+                    'made_count' => 0,
+                    'in_production_count' => 0,
+                    'generated_at' => now()->format('Y-m-d H:i'),
+                ],
+                'products' => [],
+            ], 500);
+        }
+    }
+
+    public function clientProductionHistoryExport(Request $request): StreamedResponse|JsonResponse
+    {
+        try {
+            $clientQuery = trim($request->string('client_query')->toString());
+            if ($clientQuery === '') {
+                return response()->json(['message' => 'Client name is required'], 422);
+            }
+
+            $payload = $this->buildClientProductionHistoryPayload($clientQuery);
+            $rows = $this->flattenClientProductionHistoryForExport($payload);
+
+            if ($rows === []) {
+                return response()->json(['message' => 'No production records to export'], 422);
+            }
+
+            $headers = [
+                'Client',
+                'Product / Item',
+                'Item Code',
+                'Section',
+                'Batch',
+                'Route Card',
+                'Quantity',
+                'Unit',
+                'Status',
+                'Current Stage',
+                'Machine',
+                'Machine Code',
+                'Stage Order',
+                'Total Stages',
+                'Event At',
+                'Started At',
+            ];
+
+            $safeClient = preg_replace('/[^a-zA-Z0-9_-]+/', '_', $clientQuery) ?: 'client';
+            $filename = 'client_production_history_'.$safeClient.'_'.now()->format('Y-m-d_His').'.xlsx';
+
+            return app(SpreadsheetService::class)->xlsxDownload($filename, $headers, $rows);
+        } catch (\Throwable $e) {
+            report($e);
+            Log::error('[API][reports/client-production-history/export] failed', [
+                'message' => $e->getMessage(),
+            ]);
+
+            return response()->json(['message' => 'Failed to export client production history'], 500);
+        }
+    }
+
+    /**
+     * @return array{
+     *     summary: array<string, mixed>,
+     *     products: array<int, array<string, mixed>>,
+     * }
+     */
+    private function buildClientProductionHistoryPayload(string $clientQuery): array
+    {
+        $needle = trim($clientQuery);
+        $lower = strtolower($needle);
+
+        $client = Client::query()
+            ->whereRaw('LOWER(TRIM(name)) = ?', [$lower])
+            ->orWhere('name', 'like', '%'.$needle.'%')
+            ->first();
+
+        $workOrdersQuery = WorkOrder::query();
+        $workOrdersQuery->where(function ($query) use ($client, $needle, $lower) {
+            if ($client !== null) {
+                $query->where('client_id', (int) $client->id)
+                    ->orWhereRaw('LOWER(TRIM(client_name)) = ?', [strtolower((string) $client->name)]);
+            }
+            $query->orWhereRaw('LOWER(TRIM(client_name)) = ?', [$lower])
+                ->orWhere('client_name', 'like', '%'.$needle.'%');
+        });
+
+        $workOrders = $workOrdersQuery->orderByDesc('id')->limit(500)->get();
+        $workOrdersById = $workOrders->keyBy('id')->all();
+        $workOrderIds = $workOrders->pluck('id')->all();
+
+        $resolvedClientName = $client?->name
+            ?? (string) ($workOrders->first()?->client_name ?? $needle);
+        $resolvedClientId = $client?->id
+            ?? ($workOrders->first()?->client_id !== null ? (int) $workOrders->first()->client_id : null);
+
+        if ($workOrderIds === []) {
+            return [
+                'summary' => [
+                    'client_id' => $resolvedClientId,
+                    'client_name' => $resolvedClientName,
+                    'client_query' => $needle,
+                    'product_count' => 0,
+                    'made_count' => 0,
+                    'in_production_count' => 0,
+                    'route_card_count' => 0,
+                    'generated_at' => now()->format('Y-m-d H:i'),
+                ],
+                'products' => [],
+            ];
+        }
+
+        $batches = ProductionBatch::query()
+            ->with(['workflow', 'workOrder'])
+            ->whereIn('work_order_id', $workOrderIds)
+            ->orderByDesc('id')
+            ->limit(600)
+            ->get();
+
+        $batchStageMachine = app(BatchStageMachineService::class);
+        /** @var array<string, array<string, mixed>> $productBuckets */
+        $productBuckets = [];
+        $totalMade = 0;
+        $totalInProduction = 0;
+        $routeCards = [];
+
+        foreach ($batches as $batch) {
+            $workOrder = $workOrdersById[(int) ($batch->work_order_id ?? 0)] ?? $batch->workOrder;
+            if ($workOrder === null) {
+                continue;
+            }
+
+            $itemDisplay = $this->resolveItemCatalogDisplay(
+                $workOrder->item_code,
+                $workOrder->product,
+                $batch->product_name,
+            );
+            $itemCode = (string) ($itemDisplay['item_code'] ?? '');
+            $productName = $itemCode !== ''
+                ? $itemCode
+                : (string) ($itemDisplay['item_name'] ?? '');
+            $bucketKey = strtolower($itemCode !== '' ? $itemCode : $productName);
+            if ($bucketKey === '') {
+                $bucketKey = 'batch-'.(int) $batch->id;
+            }
+
+            if (! isset($productBuckets[$bucketKey])) {
+                $productBuckets[$bucketKey] = [
+                    'item_code' => $itemCode !== '' ? $itemCode : null,
+                    'item_name' => $productName !== '' ? $productName : null,
+                    'product' => $productName !== '' ? $productName : null,
+                    'grade' => $itemDisplay['grade'],
+                    'diameter_mm' => $itemDisplay['diameter_mm'],
+                    'made_history' => [],
+                    'in_production' => [],
+                    'made_count' => 0,
+                    'in_production_count' => 0,
+                ];
+            }
+
+            $routeCard = $this->resolveRouteCardNo($workOrder);
+            if ($routeCard !== null) {
+                $routeCards[$routeCard] = true;
+            }
+            $clientName = $this->resolveClientDisplay($batch, $workOrder);
+
+            $status = strtolower(trim((string) ($batch->status ?? '')));
+            $isCompleted = $status === 'completed' || $batch->completed_at !== null;
+
+            if ($isCompleted) {
+                $madeAt = $this->safeReportDateTime($batch->completed_at ?? $batch->updated_at);
+                if ($madeAt === null) {
+                    continue;
+                }
+
+                $productBuckets[$bucketKey]['made_history'][] = [
+                    'batch_number' => (string) $batch->batch_number,
+                    'route_card_no' => $routeCard,
+                    'quantity' => (int) $batch->quantity,
+                    'unit' => $batch->unit ?? 'pcs',
+                    'made_at' => $madeAt,
+                    'started_at' => $this->safeReportDateTime($batch->started_at ?? $batch->created_at),
+                    'client_name' => $clientName ?? $resolvedClientName,
+                ];
+                $productBuckets[$bucketKey]['made_count']++;
+                $totalMade++;
+
+                continue;
+            }
+
+            if (in_array($status, ['cancelled', 'deleted'], true)) {
+                continue;
+            }
+
+            $currentStage = $batchStageMachine->currentStageForBatch($batch, $workOrdersById);
+            $machineName = is_array($currentStage) ? ($currentStage['machine_name'] ?? null) : null;
+            $machineCode = is_array($currentStage) ? ($currentStage['machine_code'] ?? null) : null;
+
+            $productBuckets[$bucketKey]['in_production'][] = [
+                'batch_number' => (string) $batch->batch_number,
+                'route_card_no' => $routeCard,
+                'quantity' => (int) $batch->quantity,
+                'unit' => $batch->unit ?? 'pcs',
+                'status' => (string) ($batch->status ?? 'in_progress'),
+                'current_stage' => (string) ($batch->current_stage ?? '—'),
+                'machine_name' => $machineName !== null ? (string) $machineName : null,
+                'machine_code' => $machineCode !== null ? (string) $machineCode : null,
+                'stage_order' => max(1, (int) ($batch->stage_order ?? 1)),
+                'total_stages' => max(1, (int) ($batch->total_stages ?? 1)),
+                'started_at' => $this->safeReportDateTime($batch->started_at ?? $batch->created_at),
+                'stage_started_at' => $this->safeReportDateTime($batch->stage_started_at),
+                'client_name' => $clientName ?? $resolvedClientName,
+            ];
+            $productBuckets[$bucketKey]['in_production_count']++;
+            $totalInProduction++;
+        }
+
+        $products = array_values($productBuckets);
+        usort($products, function (array $left, array $right) {
+            $floorDiff = ((int) ($right['in_production_count'] ?? 0))
+                <=> ((int) ($left['in_production_count'] ?? 0));
+            if ($floorDiff !== 0) {
+                return $floorDiff;
+            }
+
+            return strcmp(
+                strtolower((string) ($left['item_code'] ?? $left['product'] ?? '')),
+                strtolower((string) ($right['item_code'] ?? $right['product'] ?? '')),
+            );
+        });
+
+        foreach ($products as &$product) {
+            if (! is_array($product['made_history'] ?? null)) {
+                continue;
+            }
+            usort($product['made_history'], fn ($a, $b) => strcmp(
+                (string) ($b['made_at'] ?? ''),
+                (string) ($a['made_at'] ?? ''),
+            ));
+        }
+        unset($product);
+
+        $resolvedClientName = DisplayValue::normalize($resolvedClientName) ?? $resolvedClientName;
+
+        return [
+            'summary' => [
+                'client_id' => $resolvedClientId,
+                'client_name' => $resolvedClientName,
+                'client_query' => $needle,
+                'product_count' => count($products),
+                'made_count' => $totalMade,
+                'in_production_count' => $totalInProduction,
+                'route_card_count' => count($routeCards),
+                'generated_at' => now()->format('Y-m-d H:i'),
+            ],
+            'products' => $products,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<int, array<string, string>>
+     */
+    private function flattenClientProductionHistoryForExport(array $payload): array
+    {
+        $summary = is_array($payload['summary'] ?? null) ? $payload['summary'] : [];
+        $clientName = (string) ($summary['client_name'] ?? '');
+
+        $rows = [];
+        foreach ($payload['products'] ?? [] as $product) {
+            if (! is_array($product)) {
+                continue;
+            }
+
+            $itemCode = (string) ($product['item_code'] ?? '');
+            $itemName = (string) ($product['item_name'] ?? $product['product'] ?? '');
+
+            foreach ($product['made_history'] ?? [] as $entry) {
+                if (! is_array($entry)) {
+                    continue;
+                }
+                $rows[] = [
+                    'Client' => $clientName,
+                    'Product / Item' => $itemName,
+                    'Item Code' => $itemCode,
+                    'Section' => 'Production completed',
+                    'Batch' => (string) ($entry['batch_number'] ?? ''),
+                    'Route Card' => (string) ($entry['route_card_no'] ?? ''),
+                    'Quantity' => (string) ($entry['quantity'] ?? ''),
+                    'Unit' => (string) ($entry['unit'] ?? ''),
+                    'Status' => 'completed',
+                    'Current Stage' => '',
+                    'Machine' => '',
+                    'Machine Code' => '',
+                    'Stage Order' => '',
+                    'Total Stages' => '',
+                    'Event At' => (string) ($entry['made_at'] ?? ''),
+                    'Started At' => (string) ($entry['started_at'] ?? ''),
+                ];
+            }
+
+            foreach ($product['in_production'] ?? [] as $entry) {
+                if (! is_array($entry)) {
+                    continue;
+                }
+                $rows[] = [
+                    'Client' => $clientName,
+                    'Product / Item' => $itemName,
+                    'Item Code' => $itemCode,
+                    'Section' => 'Currently in production',
+                    'Batch' => (string) ($entry['batch_number'] ?? ''),
+                    'Route Card' => (string) ($entry['route_card_no'] ?? ''),
+                    'Quantity' => (string) ($entry['quantity'] ?? ''),
+                    'Unit' => (string) ($entry['unit'] ?? ''),
+                    'Status' => (string) ($entry['status'] ?? ''),
+                    'Current Stage' => (string) ($entry['current_stage'] ?? ''),
+                    'Machine' => (string) ($entry['machine_name'] ?? ''),
+                    'Machine Code' => (string) ($entry['machine_code'] ?? ''),
+                    'Stage Order' => (string) ($entry['stage_order'] ?? ''),
+                    'Total Stages' => (string) ($entry['total_stages'] ?? ''),
+                    'Event At' => (string) ($entry['stage_started_at'] ?? $entry['started_at'] ?? ''),
+                    'Started At' => (string) ($entry['started_at'] ?? ''),
+                ];
+            }
+        }
+
+        return $rows;
+    }
+
+    /**
+     * @return array{
+     *     summary: array<string, mixed>,
+     *     made_history: array<int, array<string, mixed>>,
+     *     in_production: array<int, array<string, mixed>>,
+     * }
+     */
+    private function buildItemProductionHistoryPayload(string $itemCode): array
+    {
+        $needle = trim($itemCode);
+        $lower = strtolower($needle);
+
+        $catalogItem = Item::query()
+            ->whereRaw('LOWER(TRIM(code)) = ?', [$lower])
+            ->orWhereRaw('LOWER(TRIM(name)) = ?', [$lower])
+            ->first();
+
+        if ($catalogItem === null) {
+            $catalogItem = Item::query()
+                ->where('code', 'like', '%'.$needle.'%')
+                ->orWhere('name', 'like', '%'.$needle.'%')
+                ->first();
+        }
+
+        $workOrders = WorkOrder::query()
+            ->where(function ($query) use ($needle, $lower) {
+                $query->where('item_code', 'like', '%'.$needle.'%')
+                    ->orWhereRaw('LOWER(TRIM(item_code)) = ?', [$lower])
+                    ->orWhere('product', 'like', '%'.$needle.'%');
+            })
+            ->orderByDesc('created_at')
+            ->get();
+
+        $workOrdersById = $workOrders->keyBy('id')->all();
+        $workOrderIds = $workOrders->pluck('id')->all();
+
+        $batchesQuery = ProductionBatch::query()->with(['workflow', 'workOrder']);
+        $batchesQuery->where(function ($query) use ($workOrderIds, $needle) {
+            if ($workOrderIds !== []) {
+                $query->whereIn('work_order_id', $workOrderIds)
+                    ->orWhere('product_name', 'like', '%'.$needle.'%');
+            } else {
+                $query->where('product_name', 'like', '%'.$needle.'%');
+            }
+        });
+        $batches = $batchesQuery->orderByDesc('id')->limit(400)->get();
+
+        $batchStageMachine = app(BatchStageMachineService::class);
+        /** @var array<int, array<string, mixed>> $madeHistory */
+        $madeHistory = [];
+        /** @var array<int, array<string, mixed>> $inProduction */
+        $inProduction = [];
+
+        foreach ($batches as $batch) {
+            $workOrder = $workOrdersById[(int) ($batch->work_order_id ?? 0)] ?? $batch->workOrder;
+            $routeCard = $workOrder?->route_card_no;
+            $status = strtolower(trim((string) ($batch->status ?? '')));
+            $isCompleted = $status === 'completed' || $batch->completed_at !== null;
+
+            if ($isCompleted) {
+                $madeAt = $this->safeReportDateTime($batch->completed_at ?? $batch->updated_at);
+                if ($madeAt === null) {
+                    continue;
+                }
+                $madeHistory[] = [
+                    'batch_number' => (string) $batch->batch_number,
+                    'route_card_no' => $routeCard !== null ? (string) $routeCard : null,
+                    'quantity' => (int) $batch->quantity,
+                    'unit' => $batch->unit ?? 'pcs',
+                    'made_at' => $madeAt,
+                    'started_at' => $this->safeReportDateTime($batch->started_at ?? $batch->created_at),
+                ];
+
+                continue;
+            }
+
+            if (in_array($status, ['cancelled', 'deleted'], true)) {
+                continue;
+            }
+
+            $currentStage = $batchStageMachine->currentStageForBatch($batch, $workOrdersById);
+            $machineName = is_array($currentStage) ? ($currentStage['machine_name'] ?? null) : null;
+            $machineCode = is_array($currentStage) ? ($currentStage['machine_code'] ?? null) : null;
+
+            $inProduction[] = [
+                'batch_number' => (string) $batch->batch_number,
+                'route_card_no' => $routeCard !== null ? (string) $routeCard : null,
+                'quantity' => (int) $batch->quantity,
+                'unit' => $batch->unit ?? 'pcs',
+                'status' => (string) ($batch->status ?? 'in_progress'),
+                'current_stage' => (string) ($batch->current_stage ?? '—'),
+                'machine_name' => $machineName !== null ? (string) $machineName : null,
+                'machine_code' => $machineCode !== null ? (string) $machineCode : null,
+                'stage_order' => max(1, (int) ($batch->stage_order ?? 1)),
+                'total_stages' => max(1, (int) ($batch->total_stages ?? 1)),
+                'started_at' => $this->safeReportDateTime($batch->started_at ?? $batch->created_at),
+                'stage_started_at' => $this->safeReportDateTime($batch->stage_started_at),
+            ];
+        }
+
+        usort($madeHistory, function (array $left, array $right) {
+            return strcmp((string) ($right['made_at'] ?? ''), (string) ($left['made_at'] ?? ''));
+        });
+
+        usort($inProduction, function (array $left, array $right) {
+            return strcmp(
+                (string) ($right['stage_started_at'] ?? $right['started_at'] ?? ''),
+                (string) ($left['stage_started_at'] ?? $left['started_at'] ?? ''),
+            );
+        });
+
+        return [
+            'summary' => [
+                'item_code' => $needle,
+                'item_name' => $catalogItem?->name,
+                'item_description' => $catalogItem?->description,
+                'grade' => $catalogItem?->grade,
+                'diameter_mm' => $catalogItem?->diameter_mm !== null
+                    ? round((float) $catalogItem->diameter_mm, 2)
+                    : null,
+                'batch_count' => $batches->count(),
+                'made_count' => count($madeHistory),
+                'in_production_count' => count($inProduction),
+                'generated_at' => now()->format('Y-m-d H:i'),
+            ],
+            'made_history' => array_values($madeHistory),
+            'in_production' => array_values($inProduction),
+        ];
+    }
+
+    /**
+     * @return array{
+     *     summary: array<string, mixed>,
+     *     received_history: array<int, array<string, mixed>>,
+     *     in_use: array<int, array<string, mixed>>,
+     * }
+     */
+    private function buildRawMaterialHistoryPayload(string $materialCode): array
+    {
+        $needle = trim($materialCode);
+        $inventoryItems = $this->resolveRawMaterialInventoryItems($needle);
+        $primaryItem = $inventoryItems->first();
+
+        /** @var array<int, array<string, mixed>> $receivedHistory */
+        $receivedHistory = [];
+        $checkins = InventoryTransaction::query()
+            ->where('type', 'checkin')
+            ->orderByDesc('id')
+            ->limit(600)
+            ->get();
+
+        foreach ($checkins as $checkin) {
+            $items = is_array($checkin->items) ? $checkin->items : [];
+            foreach ($items as $line) {
+                if (! is_array($line) || ! $this->checkinLineMatchesRawMaterial($line, $inventoryItems, $needle)) {
+                    continue;
+                }
+
+                $unit = (string) ($line['unit'] ?? $checkin->unit ?? 'pcs');
+                $itemName = (string) ($line['item_name'] ?? $checkin->material_name ?? '—');
+                $history = is_array($line['receipt_history'] ?? null) ? $line['receipt_history'] : [];
+
+                if ($history !== []) {
+                    foreach ($history as $receipt) {
+                        if (! is_array($receipt)) {
+                            continue;
+                        }
+                        $qty = (int) ($receipt['quantity'] ?? 0);
+                        if ($qty <= 0) {
+                            continue;
+                        }
+                        $receivedAt = $this->safeReportDateTime($receipt['received_at'] ?? null)
+                            ?? $this->safeReportDateTime($checkin->updated_at ?? $checkin->created_at);
+
+                        $receivedHistory[] = [
+                            'received_at' => $receivedAt,
+                            'quantity' => $qty,
+                            'unit' => $unit,
+                            'item_name' => $itemName,
+                            'po_number' => $checkin->po_number,
+                            'mrn_number' => $checkin->mrn_number,
+                            'supplier' => $checkin->supplier,
+                            'checkin_id' => (int) $checkin->id,
+                        ];
+                    }
+
+                    continue;
+                }
+
+                $receivedQty = (int) ($line['received_quantity'] ?? 0);
+                if ($receivedQty <= 0) {
+                    continue;
+                }
+
+                $receivedHistory[] = [
+                    'received_at' => $this->safeReportDateTime($checkin->updated_at ?? $checkin->created_at),
+                    'quantity' => $receivedQty,
+                    'unit' => $unit,
+                    'item_name' => $itemName,
+                    'po_number' => $checkin->po_number,
+                    'mrn_number' => $checkin->mrn_number,
+                    'supplier' => $checkin->supplier,
+                    'checkin_id' => (int) $checkin->id,
+                ];
+            }
+        }
+
+        usort($receivedHistory, function (array $left, array $right) {
+            return strcmp((string) ($right['received_at'] ?? ''), (string) ($left['received_at'] ?? ''));
+        });
+
+        /** @var array<int, array<string, mixed>> $inUse */
+        $inUse = [];
+
+        $stockByLocation = [];
+        foreach ($inventoryItems as $inventoryRow) {
+            $qty = (int) $inventoryRow->quantity;
+            if ($qty <= 0) {
+                continue;
+            }
+            $location = filled($inventoryRow->location)
+                ? (string) $inventoryRow->location
+                : 'Warehouse';
+            $unit = (string) ($inventoryRow->unit ?? 'pcs');
+            $stockByLocation[$location] ??= ['quantity' => 0, 'unit' => $unit, 'status' => 'in_stock'];
+            $stockByLocation[$location]['quantity'] += $qty;
+            if (($inventoryRow->status ?? '') === 'pending_qc') {
+                $stockByLocation[$location]['status'] = 'pending_qc';
+            }
+        }
+
+        foreach ($stockByLocation as $location => $stockRow) {
+            $inUse[] = [
+                'kind' => 'stock',
+                'location' => $location,
+                'quantity' => (int) $stockRow['quantity'],
+                'unit' => (string) $stockRow['unit'],
+                'status' => (string) $stockRow['status'],
+                'since_at' => null,
+                'reference' => null,
+            ];
+        }
+
+        $inventoryIds = $inventoryItems->pluck('id')->map(fn ($id) => (int) $id)->values()->all();
+
+        if ($inventoryIds !== []) {
+            $requisitions = MaterialRequisition::query()
+                ->whereIn('inventory_item_id', $inventoryIds)
+                ->whereIn('status', ['pending'])
+                ->orderByDesc('created_at')
+                ->limit(80)
+                ->get();
+
+            foreach ($requisitions as $requisition) {
+                $destination = $requisition->destination_type === 'packing'
+                    ? 'Packing'
+                    : trim(implode(' · ', array_filter([
+                        $requisition->machine_name,
+                        $requisition->machine_code,
+                    ])));
+
+                $inUse[] = [
+                    'kind' => 'requisition',
+                    'location' => $destination !== '' ? $destination : 'Requested',
+                    'quantity' => (float) $requisition->quantity,
+                    'unit' => (string) ($requisition->unit ?? 'pcs'),
+                    'status' => (string) $requisition->status,
+                    'since_at' => $this->safeReportDateTime($requisition->created_at),
+                    'reference' => $requisition->recipient_name
+                        ? 'For '.$requisition->recipient_name
+                        : null,
+                ];
+            }
+
+            $batchRequests = BatchMaterialRequest::query()
+                ->with('productionBatch.workOrder')
+                ->whereIn('inventory_item_id', $inventoryIds)
+                ->whereIn('status', ['pending', 'approved'])
+                ->orderByDesc('created_at')
+                ->limit(80)
+                ->get();
+
+            foreach ($batchRequests as $batchRequest) {
+                $batch = $batchRequest->productionBatch;
+                $workOrder = $batch?->workOrder;
+                $stage = (string) ($batch?->current_stage ?? '—');
+                $machineBits = array_filter([$stage, $batch?->batch_number]);
+
+                $inUse[] = [
+                    'kind' => 'batch_request',
+                    'location' => $machineBits !== [] ? implode(' · ', $machineBits) : 'Production',
+                    'quantity' => (float) $batchRequest->quantity,
+                    'unit' => (string) ($batchRequest->unit ?? 'pcs'),
+                    'status' => (string) $batchRequest->status,
+                    'since_at' => $this->safeReportDateTime($batchRequest->created_at),
+                    'reference' => $workOrder?->route_card_no
+                        ? 'Route '.$workOrder->route_card_no
+                        : ($batch?->batch_number ? 'Batch '.$batch->batch_number : null),
+                ];
+            }
+
+            $workOrderIds = WorkOrderMaterial::query()
+                ->whereIn('inventory_item_id', $inventoryIds)
+                ->pluck('work_order_id')
+                ->unique()
+                ->values()
+                ->all();
+
+            if ($workOrderIds !== []) {
+                $batches = ProductionBatch::query()
+                    ->with('workOrder')
+                    ->whereIn('work_order_id', $workOrderIds)
+                    ->where(function ($query) {
+                        $query->whereNull('completed_at')
+                            ->whereNotIn('status', ['completed', 'cancelled', 'deleted']);
+                    })
+                    ->orderByDesc('id')
+                    ->limit(120)
+                    ->get();
+
+                $batchStageMachine = app(BatchStageMachineService::class);
+
+                foreach ($batches as $batch) {
+                    $workOrder = $batch->workOrder;
+                    $workOrdersById = $workOrder !== null
+                        ? [(int) $workOrder->id => $workOrder]
+                        : [];
+                    $currentStage = $batchStageMachine->currentStageForBatch($batch, $workOrdersById);
+                    $machineName = is_array($currentStage) ? ($currentStage['machine_name'] ?? null) : null;
+                    $machineCode = is_array($currentStage) ? ($currentStage['machine_code'] ?? null) : null;
+
+                    $stageLabel = (string) ($batch->current_stage ?? '');
+                    if (trim($stageLabel) === '' || $stageLabel === '—') {
+                        $stageLabel = 'Stage '.max(1, (int) ($batch->stage_order ?? 1));
+                    }
+
+                    $location = trim(implode(' · ', array_filter([
+                        $stageLabel,
+                        $machineName,
+                        $machineCode,
+                    ])));
+
+                    $materialLine = WorkOrderMaterial::query()
+                        ->where('work_order_id', $batch->work_order_id)
+                        ->whereIn('inventory_item_id', $inventoryIds)
+                        ->first();
+
+                    $referenceParts = array_filter([
+                        $workOrder?->route_card_no !== null ? 'Route '.$workOrder->route_card_no : null,
+                        $batch->batch_number !== null ? 'Batch '.$batch->batch_number : null,
+                        $materialLine !== null
+                            ? sprintf(
+                                'Allocated %.2f %s',
+                                (float) $materialLine->quantity,
+                                (string) ($materialLine->unit ?? 'kg'),
+                            )
+                            : null,
+                    ]);
+
+                    $inUse[] = [
+                        'kind' => 'production',
+                        'location' => $location !== '' ? $location : 'Production floor',
+                        'quantity' => $materialLine !== null
+                            ? (float) $materialLine->quantity
+                            : (int) $batch->quantity,
+                        'unit' => (string) ($materialLine?->unit ?? $batch->unit ?? 'pcs'),
+                        'status' => (string) ($batch->status ?? 'in_progress'),
+                        'since_at' => $this->safeReportDateTime($batch->stage_started_at ?? $batch->started_at),
+                        'reference' => $referenceParts !== [] ? implode(' · ', $referenceParts) : null,
+                    ];
+                }
+            }
+        }
+
+        $totalStock = (int) $inventoryItems->sum(fn (InventoryItem $row) => (int) $row->quantity);
+        $stockUnit = (string) ($primaryItem?->unit ?? 'pcs');
+        $locations = $inventoryItems
+            ->pluck('location')
+            ->filter(fn ($value) => filled($value))
+            ->unique()
+            ->values()
+            ->all();
+
+        return [
+            'summary' => [
+                'material_code' => $primaryItem?->name ?? $needle,
+                'material_name' => $primaryItem?->name,
+                'material_sku' => $primaryItem?->sku,
+                'inventory_item_id' => $primaryItem?->id,
+                'inventory_batch_count' => $inventoryItems->count(),
+                'stock_quantity' => $totalStock,
+                'stock_unit' => $stockUnit,
+                'stock_location' => $locations !== []
+                    ? implode(', ', array_map('strval', $locations))
+                    : $primaryItem?->location,
+                'received_count' => count($receivedHistory),
+                'in_use_count' => count($inUse),
+                'generated_at' => now()->format('Y-m-d H:i'),
+            ],
+            'received_history' => array_values($receivedHistory),
+            'in_use' => array_values($inUse),
+        ];
+    }
+
+    /**
+     * @return \Illuminate\Support\Collection<int, InventoryItem>
+     */
+    private function resolveRawMaterialInventoryItems(string $needle): \Illuminate\Support\Collection
+    {
+        $trimmed = trim($needle);
+        if ($trimmed === '') {
+            return collect();
+        }
+
+        $lower = strtolower($trimmed);
+        $searchKey = $this->materialCompactKey($this->normalizeMaterialSearchPhrase($trimmed));
+        [$grade, $diameter] = $this->parseMaterialGradeDiameter($trimmed);
+
+        $candidates = InventoryItem::query()
+            ->where('type', 'raw_material')
+            ->orderByDesc('quantity')
+            ->get();
+
+        $matched = $candidates->filter(function (InventoryItem $item) use ($lower, $searchKey, $grade, $diameter) {
+            $name = (string) ($item->name ?? '');
+            $sku = (string) ($item->sku ?? '');
+
+            if (strtolower(trim($sku)) === $lower || strtolower(trim($name)) === $lower) {
+                return true;
+            }
+
+            if ($searchKey !== '') {
+                $nameKey = $this->materialCompactKey($name);
+                $skuKey = $this->materialCompactKey($sku);
+                if ($nameKey === $searchKey || $skuKey === $searchKey) {
+                    return true;
+                }
+            }
+
+            if ($grade !== null && $diameter !== null) {
+                [$itemGrade, $itemDiameter] = $this->parseMaterialGradeDiameter($name);
+                if ($itemGrade !== null && $itemDiameter !== null) {
+                    return strtolower($itemGrade) === strtolower($grade)
+                        && abs($itemDiameter - $diameter) < 0.01;
+                }
+
+                $normalizedName = strtolower($name);
+                $gradeLower = strtolower($grade);
+                $diameterText = rtrim(rtrim(sprintf('%.2f', $diameter), '0'), '.');
+
+                return str_contains($normalizedName, $gradeLower)
+                    && (
+                        str_contains($normalizedName, 'dia '.$diameterText)
+                        || str_contains($normalizedName, 'dia'.$diameterText)
+                        || preg_match('/\b'.preg_quote($diameterText, '/').'\b/', $normalizedName) === 1
+                    );
+            }
+
+            return str_contains(strtolower($name), $lower)
+                || str_contains(strtolower($sku), $lower);
+        });
+
+        if ($matched->isEmpty()) {
+            return collect();
+        }
+
+        $primaryNameKey = $this->materialCompactKey((string) ($matched->first()->name ?? ''));
+
+        return $candidates
+            ->filter(fn (InventoryItem $item) => $this->materialCompactKey((string) ($item->name ?? '')) === $primaryNameKey)
+            ->values();
+    }
+
+    private function normalizeMaterialSearchPhrase(string $needle): string
+    {
+        $value = trim($needle);
+        $value = preg_replace('/\s+/', ' ', $value) ?? $value;
+        $value = preg_replace('/dia\s*(\d)/i', 'DIA $1', $value) ?? $value;
+
+        return $value;
+    }
+
+    private function materialCompactKey(string $value): string
+    {
+        $normalized = strtolower(trim($value));
+        $normalized = preg_replace('/\s+/', '', $normalized) ?? $normalized;
+
+        return preg_replace('/[^a-z0-9.]/', '', $normalized) ?? '';
+    }
+
+    /**
+     * @return array{0: ?string, 1: ?float}
+     */
+    private function parseMaterialGradeDiameter(string $value): array
+    {
+        $phrase = $this->normalizeMaterialSearchPhrase($value);
+        if (preg_match('/^([a-z0-9]+)\s*(?:dia\s*)?(\d+(?:\.\d+)?)/i', $phrase, $matches) === 1) {
+            return [$matches[1], (float) $matches[2]];
+        }
+
+        if (preg_match('/^([a-z0-9]+)\s*[-\s]\s*(\d+(?:\.\d+)?)/i', $phrase, $matches) === 1) {
+            return [$matches[1], (float) $matches[2]];
+        }
+
+        return [null, null];
+    }
+
+    /**
+     * @param  array<string, mixed>  $line
+     * @param  \Illuminate\Support\Collection<int, InventoryItem>  $inventoryItems
+     */
+    private function checkinLineMatchesRawMaterial(
+        array $line,
+        \Illuminate\Support\Collection $inventoryItems,
+        string $needle,
+    ): bool {
+        foreach ($inventoryItems as $inventoryItem) {
+            if ($this->checkinLineMatchesInventoryItem($line, $inventoryItem)) {
+                return true;
+            }
+        }
+
+        $lineName = (string) ($line['item_name'] ?? '');
+        $searchKey = $this->materialCompactKey($this->normalizeMaterialSearchPhrase($needle));
+        $lineKey = $this->materialCompactKey($lineName);
+
+        if ($searchKey !== '' && $lineKey === $searchKey) {
+            return true;
+        }
+
+        [$grade, $diameter] = $this->parseMaterialGradeDiameter($needle);
+        if ($grade !== null && $diameter !== null) {
+            [$lineGrade, $lineDiameter] = $this->parseMaterialGradeDiameter($lineName);
+            if ($lineGrade !== null && $lineDiameter !== null) {
+                return strtolower($lineGrade) === strtolower($grade)
+                    && abs($lineDiameter - $diameter) < 0.01;
+            }
+        }
+
+        $lowerNeedle = strtolower(trim($needle));
+        $lowerLine = strtolower(trim($lineName));
+
+        if ($lowerNeedle === '') {
+            return false;
+        }
+
+        return $lowerLine === $lowerNeedle
+            || str_contains($lowerLine, $lowerNeedle)
+            || str_contains($lowerNeedle, $lowerLine);
+    }
+
+    /**
+     * @param  array<string, mixed>  $line
+     */
+    private function checkinLineMatchesInventoryItem(array $line, InventoryItem $inventoryItem): bool
+    {
+        $lineInventoryId = (int) ($line['inventory_id'] ?? 0);
+        if ($lineInventoryId > 0 && $lineInventoryId === (int) $inventoryItem->id) {
+            return true;
+        }
+
+        $skuLower = strtolower(trim((string) ($inventoryItem->sku ?? '')));
+        $nameLower = strtolower(trim((string) ($inventoryItem->name ?? '')));
+        $lineName = strtolower(trim((string) ($line['item_name'] ?? '')));
+
+        if ($lineName !== '' && ($lineName === $skuLower || $lineName === $nameLower)) {
+            return true;
+        }
+
+        $searchKey = $this->materialCompactKey($nameLower);
+        $lineKey = $this->materialCompactKey($lineName);
+
+        return $searchKey !== '' && $lineKey === $searchKey;
+    }
+
+    /**
+     * @return array{summary: array<string, mixed>, machines: array<int, array<string, mixed>>}
+     */
+    private function buildMachineProcessingHistoryPayload(Request $request): array
+    {
+        $batchStageMachine = app(BatchStageMachineService::class);
+        $machineFilter = $request->filled('machine_id')
+            ? (int) $request->query('machine_id')
+            : null;
+        $includeInProgress = filter_var(
+            $request->query('include_in_progress', true),
+            FILTER_VALIDATE_BOOL,
+        );
+        $activeBatchesOnly = $request->boolean('active_only');
+        $searchNeedle = strtolower(trim((string) $request->query('search', '')));
+
+        $from = $this->parseReportDateFilter($request->query('from'));
+        $to = $this->parseReportDateFilter($request->query('to'), endOfDay: true);
+
+        $batches = ProductionBatch::query()
+            ->with(['workflow'])
+            ->whereNotNull('stage_history')
+            ->latest('updated_at')
+            ->get();
+
+        $workOrdersById = $this->workOrdersForBatches($batches);
+
+        /** @var array<int, array<string, mixed>> $machineRows */
+        $machineRows = [];
+        foreach (Machinery::query()->orderBy('id')->get() as $machine) {
+            $machineRows[(int) $machine->id] = [
+                'machine_id' => (int) $machine->id,
+                'machine_code' => $machine->machine_code,
+                'machine_name' => $machine->name,
+                'type' => $machine->type,
+                'location' => $machine->location,
+                'event_count' => 0,
+                'events' => [],
+            ];
+        }
+
+        $unassigned = [
+            'machine_id' => null,
+            'machine_code' => null,
+            'machine_name' => 'Unassigned / Unknown machine',
+            'type' => null,
+            'location' => null,
+            'event_count' => 0,
+            'events' => [],
+        ];
+
+        $totalEvents = 0;
+
+        foreach ($batches as $batch) {
+            $batchStatus = strtolower(trim((string) ($batch->status ?? '')));
+            $batchIsFinished = $batchStatus === 'completed' || $batch->completed_at !== null;
+
+            if ($activeBatchesOnly && $batchIsFinished) {
+                continue;
+            }
+
+            $history = array_values($batch->stage_history ?? []);
+            if ($history === []) {
+                continue;
+            }
+
+            $stages = $batchStageMachine->resolveStagesForBatch($batch, $workOrdersById);
+            $workOrder = $workOrdersById[(int) ($batch->work_order_id ?? 0)] ?? null;
+            $materialMeta = $this->batchMaterialMeta($batch, $workOrder);
+
+            foreach ($history as $index => $entry) {
+                if (! is_array($entry)) {
+                    continue;
+                }
+
+                $stageName = trim((string) ($entry['stage'] ?? ''));
+                if ($stageName === '') {
+                    continue;
+                }
+
+                $completedRaw = $entry['completed'] ?? $entry['completed_at'] ?? null;
+                $isOpen = $completedRaw === null
+                    || (is_string($completedRaw) && trim($completedRaw) === '');
+
+                if ($isOpen && $batchIsFinished) {
+                    $isOpen = false;
+                }
+
+                if (! $includeInProgress && $isOpen) {
+                    continue;
+                }
+
+                $startedAt = $this->safeReportDateTime($entry['started'] ?? $entry['started_at'] ?? null);
+                $completedAt = $isOpen ? null : $this->safeReportDateTime($completedRaw);
+                if (! $isOpen && $completedAt === null && $batchIsFinished) {
+                    $completedAt = $this->safeReportDateTime($batch->completed_at);
+                }
+                $sortAt = $completedAt ?? $startedAt;
+                if ($sortAt === null) {
+                    continue;
+                }
+
+                if ($from !== null || $to !== null) {
+                    try {
+                        $sortCarbon = Carbon::parse($sortAt);
+                        if ($from !== null && $sortCarbon->lt($from)) {
+                            continue;
+                        }
+                        if ($to !== null && $sortCarbon->gt($to)) {
+                            continue;
+                        }
+                    } catch (\Throwable) {
+                        continue;
+                    }
+                }
+
+                $stageDef = $this->stageDefinitionForHistoryEntry($stages, $history, $index);
+                $machineId = $stageDef !== null
+                    ? $batchStageMachine->machineIdForStage($stageDef)
+                    : null;
+
+                if ($machineFilter !== null && (int) $machineFilter !== (int) ($machineId ?? 0)) {
+                    continue;
+                }
+
+                $event = [
+                    'batch_id' => (int) $batch->id,
+                    'batch_number' => (string) $batch->batch_number,
+                    'work_order_id' => $batch->work_order_id ? (int) $batch->work_order_id : null,
+                    'route_card' => $materialMeta['route_card'],
+                    'product_name' => $materialMeta['product_name'],
+                    'item_name' => $materialMeta['item_name'],
+                    'item_code' => $materialMeta['item_code'],
+                    'grade' => $materialMeta['grade'],
+                    'diameter_mm' => $materialMeta['diameter_mm'],
+                    'quantity' => (int) $batch->quantity,
+                    'unit' => $batch->unit,
+                    'stage' => $stageName,
+                    'operator' => trim((string) ($entry['user'] ?? '')) ?: ($batch->assigned_to ?? $batch->user_name ?? '—'),
+                    'started_at' => $startedAt ?? '—',
+                    'processed_at' => $completedAt ?? ($isOpen ? '—' : $startedAt ?? '—'),
+                    'completed_at' => $completedAt,
+                    'duration' => trim((string) ($entry['duration'] ?? '')) ?: '—',
+                    'in_progress' => $isOpen,
+                    'batch_status' => (string) ($batch->status ?? ''),
+                    'batch_completed' => $batchIsFinished,
+                    'sort_at' => $sortAt,
+                ];
+
+                if ($searchNeedle !== '') {
+                    $machineMeta = $machineId !== null && isset($machineRows[$machineId])
+                        ? $machineRows[$machineId]
+                        : $unassigned;
+                    if (! $this->machineProcessingEventMatchesSearch($machineMeta, $event, $searchNeedle)) {
+                        continue;
+                    }
+                }
+
+                $totalEvents++;
+
+                if ($machineId !== null && isset($machineRows[$machineId])) {
+                    $machineRows[$machineId]['events'][] = $event;
+                    $machineRows[$machineId]['event_count']++;
+                } else {
+                    $unassigned['events'][] = $event;
+                    $unassigned['event_count']++;
+                }
+            }
+        }
+
+        $sortEvents = function (array &$events): void {
+            usort($events, function (array $left, array $right) {
+                return strcmp((string) ($right['sort_at'] ?? ''), (string) ($left['sort_at'] ?? ''));
+            });
+            foreach ($events as &$event) {
+                unset($event['sort_at']);
+            }
+            unset($event);
+        };
+
+        foreach ($machineRows as &$row) {
+            $sortEvents($row['events']);
+        }
+        unset($row);
+        $sortEvents($unassigned['events']);
+
+        $rows = array_values($machineRows);
+        if ($unassigned['event_count'] > 0) {
+            $rows[] = $unassigned;
+        }
+
+        if ($machineFilter !== null) {
+            $rows = array_values(array_filter(
+                $rows,
+                fn (array $row) => (int) ($row['machine_id'] ?? 0) === $machineFilter
+                    || ($row['machine_id'] === null && $machineFilter === 0),
+            ));
+        } else {
+            $rows = array_values(array_filter(
+                $rows,
+                fn (array $row) => (int) ($row['event_count'] ?? 0) > 0,
+            ));
+        }
+
+        return [
+            'summary' => [
+                'total_machines' => count(array_filter($rows, fn (array $r) => $r['machine_id'] !== null)),
+                'total_events' => $totalEvents,
+                'generated_at' => now()->format('Y-m-d H:i'),
+            ],
+            'machines' => $rows,
+        ];
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $stages
+     * @param  array<int, array<string, mixed>>  $history
+     * @return array<string, mixed>|null
+     */
+    private function stageDefinitionForHistoryEntry(
+        array $stages,
+        array $history,
+        int $entryIndex,
+    ): ?array {
+        $entry = $history[$entryIndex] ?? null;
+        if (! is_array($entry)) {
+            return null;
+        }
+
+        $stageName = trim((string) ($entry['stage'] ?? ''));
+        if ($stageName === '') {
+            return null;
+        }
+
+        $targetOccurrence = 0;
+        for ($i = 0; $i <= $entryIndex; $i++) {
+            $prior = $history[$i] ?? null;
+            if (! is_array($prior)) {
+                continue;
+            }
+            if (strcasecmp(trim((string) ($prior['stage'] ?? '')), $stageName) === 0) {
+                $targetOccurrence++;
+            }
+        }
+
+        if ($targetOccurrence < 1) {
+            return ['name' => $stageName];
+        }
+
+        $seen = 0;
+        foreach ($stages as $stage) {
+            if (strcasecmp(trim((string) ($stage['name'] ?? '')), $stageName) !== 0) {
+                continue;
+            }
+            $seen++;
+            if ($seen === $targetOccurrence) {
+                return $stage;
+            }
+        }
+
+        return ['name' => $stageName];
+    }
+
+    /**
+     * @return array{
+     *     product_name: string,
+     *     item_name: string,
+     *     item_code: ?string,
+     *     grade: ?string,
+     *     diameter_mm: ?float,
+     *     route_card: ?string,
+     * }
+     */
+    private function batchMaterialMeta(ProductionBatch $batch, ?WorkOrder $workOrder = null): array
+    {
+        if ($workOrder === null && ! empty($batch->work_order_id)) {
+            $workOrder = WorkOrder::query()->find($batch->work_order_id);
+        }
+
+        $itemDisplay = $this->resolveItemCatalogDisplay(
+            $workOrder?->item_code,
+            $workOrder?->product,
+            $batch->product_name,
+        );
+        $productLabel = $itemDisplay['item_code']
+            ?? $itemDisplay['item_name']
+            ?? DisplayValue::normalize($batch->product_name)
+            ?? 'Product';
+
+        $routeCard = $this->resolveRouteCardNo($workOrder);
+        if ($routeCard === null) {
+            $routeCard = DisplayValue::normalize($batch->workflow?->name);
+        }
+
+        return [
+            'product_name' => (string) $productLabel,
+            'item_name' => (string) $productLabel,
+            'item_code' => $itemDisplay['item_code'],
+            'item_description' => $itemDisplay['item_description'] ?? null,
+            'grade' => $itemDisplay['grade'],
+            'diameter_mm' => $itemDisplay['diameter_mm'],
+            'route_card' => $routeCard !== null ? (string) $routeCard : null,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $machineRow
+     * @param  array<string, mixed>  $event
+     */
+    private function machineProcessingEventMatchesSearch(
+        array $machineRow,
+        array $event,
+        string $needle,
+    ): bool {
+        if ($needle === '') {
+            return true;
+        }
+
+        $haystack = strtolower(implode(' ', array_filter([
+            (string) ($machineRow['machine_name'] ?? ''),
+            (string) ($machineRow['machine_code'] ?? ''),
+            (string) ($machineRow['location'] ?? ''),
+            (string) ($event['batch_number'] ?? ''),
+            (string) ($event['route_card'] ?? ''),
+            (string) ($event['item_code'] ?? ''),
+            (string) ($event['item_name'] ?? ''),
+            (string) ($event['product_name'] ?? ''),
+            (string) ($event['grade'] ?? ''),
+            (string) ($event['stage'] ?? ''),
+            (string) ($event['operator'] ?? ''),
+        ], fn (string $part) => $part !== '')));
+
+        return $haystack !== '' && str_contains($haystack, $needle);
+    }
+
+    private function parseReportDateFilter(mixed $value, bool $endOfDay = false): ?Carbon
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        try {
+            $parsed = Carbon::parse((string) $value);
+
+            return $endOfDay ? $parsed->endOfDay() : $parsed->startOfDay();
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
     /**
      * @return array{summary: array<string, mixed>, machines: array<int, array<string, mixed>>}
      */
@@ -69,7 +1755,10 @@ class ReportController extends Controller
 
         $batchQuery = ProductionBatch::query()
             ->with(['workflow'])
-            ->where('status', '!=', 'completed');
+            ->where(function ($query) {
+                $query->whereNull('completed_at')
+                    ->whereNotIn('status', ['completed', 'cancelled', 'deleted']);
+            });
 
         if (! $includeOnHold) {
             $batchQuery->where('status', '!=', 'on_hold');
@@ -249,6 +1938,86 @@ class ReportController extends Controller
      * @param  iterable<int, ProductionBatch>  $batches
      * @return array<int, WorkOrder>
      */
+    private function resolveRouteCardNo(?WorkOrder $workOrder): ?string
+    {
+        return DisplayValue::normalize($workOrder?->route_card_no);
+    }
+
+    private function resolveClientDisplay(ProductionBatch $batch, ?WorkOrder $workOrder): ?string
+    {
+        foreach ([$batch->client_name, $workOrder?->client_name] as $candidate) {
+            $normalized = DisplayValue::normalize($candidate);
+            if ($normalized !== null) {
+                return $normalized;
+            }
+        }
+
+        $clientId = (int) ($workOrder?->client_id ?? 0);
+        if ($clientId > 0) {
+            return Client::query()->find($clientId)?->name;
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array{
+     *     item_code: ?string,
+     *     item_name: ?string,
+     *     item_description: ?string,
+     *     grade: ?string,
+     *     diameter_mm: ?float,
+     * }
+     */
+    private function resolveItemCatalogDisplay(
+        mixed $itemCodeRaw,
+        mixed $productRaw,
+        mixed $batchProductRaw,
+    ): array {
+        $itemCode = DisplayValue::normalize(is_string($itemCodeRaw) ? $itemCodeRaw : null)
+            ?? DisplayValue::normalize(is_string($productRaw) ? $productRaw : null);
+
+        if ($itemCode === null) {
+            $fallback = DisplayValue::normalize(is_string($batchProductRaw) ? $batchProductRaw : null);
+
+            return [
+                'item_code' => null,
+                'item_name' => $fallback,
+                'grade' => null,
+                'diameter_mm' => null,
+            ];
+        }
+
+        $catalogItem = Item::query()
+            ->whereRaw('LOWER(TRIM(code)) = ?', [strtolower($itemCode)])
+            ->first();
+
+        if ($catalogItem === null) {
+            $catalogItem = Item::query()
+                ->where('code', 'like', '%'.$itemCode.'%')
+                ->orWhere('name', 'like', '%'.$itemCode.'%')
+                ->first();
+        }
+
+        $description = DisplayValue::normalize($catalogItem?->description);
+        $catalogName = DisplayValue::normalize($catalogItem?->name);
+        $textFallback = DisplayValue::normalize(is_string($productRaw) ? $productRaw : null)
+            ?? DisplayValue::normalize(is_string($batchProductRaw) ? $batchProductRaw : null);
+        $itemDescription = $description
+            ?? ($catalogName !== null && strcasecmp($catalogName, $itemCode) !== 0 ? $catalogName : null)
+            ?? ($textFallback !== null && strcasecmp($textFallback, $itemCode) !== 0 ? $textFallback : null);
+
+        return [
+            'item_code' => $itemCode,
+            'item_name' => $itemCode,
+            'item_description' => $itemDescription,
+            'grade' => DisplayValue::normalize($catalogItem?->grade),
+            'diameter_mm' => $catalogItem?->diameter_mm !== null
+                ? round((float) $catalogItem->diameter_mm, 2)
+                : null,
+        ];
+    }
+
     private function workOrdersForBatches(iterable $batches): array
     {
         if (! Schema::hasColumn('production_batches', 'work_order_id')) {
@@ -287,32 +2056,32 @@ class ReportController extends Controller
             $workOrder = WorkOrder::query()->find($batch->work_order_id);
         }
 
-        $routeCard = null;
-        if ($workOrder !== null) {
-            $routeCard = $workOrder->route_card_no ?? $workOrder->workflow_name ?? null;
-        }
-        $routeCard ??= $batch->workflow?->name;
+        $routeCard = $this->resolveRouteCardNo($workOrder);
+        $itemDisplay = $this->resolveItemCatalogDisplay(
+            $workOrder?->item_code,
+            $workOrder?->product,
+            $batch->product_name,
+        );
+        $clientName = $this->resolveClientDisplay($batch, $workOrder);
 
-        $itemCode = $workOrder?->item_code;
-        $itemName = $workOrder?->item_name;
-        if ($itemName === null || trim((string) $itemName) === '') {
-            $itemName = filled($itemCode)
-                ? (string) $itemCode
-                : (string) ($batch->product_name ?: 'Product');
-        }
-
-        $stageLabel = trim((string) ($batch->current_stage ?? ''));
-        if ($stageLabel === '') {
-            $stageLabel = trim((string) ($currentStage['name'] ?? '—'));
+        $stageLabel = DisplayValue::normalize($batch->current_stage);
+        if ($stageLabel === null) {
+            $stageLabel = DisplayValue::normalize($currentStage['name'] ?? null) ?? '—';
         }
         $isOnHold = strtolower(trim((string) ($batch->status ?? ''))) === 'on_hold';
+        $productLabel = $itemDisplay['item_code']
+            ?? $itemDisplay['item_name']
+            ?? DisplayValue::normalize($batch->product_name)
+            ?? 'Product';
 
         return [
             'batch_id' => (int) $batch->id,
             'batch_number' => (string) $batch->batch_number,
-            'product_name' => (string) ($batch->product_name ?: 'Product'),
-            'item_name' => (string) $itemName,
-            'item_code' => $itemCode !== null ? (string) $itemCode : null,
+            'product_name' => $productLabel,
+            'item_name' => $productLabel,
+            'item_code' => $itemDisplay['item_code'],
+            'grade' => $itemDisplay['grade'],
+            'diameter_mm' => $itemDisplay['diameter_mm'],
             'quantity' => (int) $batch->quantity,
             'unit' => $batch->unit,
             'current_stage' => $stageLabel !== '' ? $stageLabel : '—',
@@ -325,7 +2094,7 @@ class ReportController extends Controller
                 : 'normal',
             'work_order_id' => $batch->work_order_id,
             'route_card_no' => $routeCard,
-            'client_name' => $batch->client_name ?? $workOrder?->client_name,
+            'client_name' => $clientName,
             'stage_started_at' => $this->safeReportDateTime($batch->stage_started_at ?? $batch->started_at),
             'started_at' => $this->safeReportDateTime($batch->started_at ?? $batch->created_at),
             'operator' => $batch->assigned_to ?? $batch->user_name ?? $batch->performed_by,

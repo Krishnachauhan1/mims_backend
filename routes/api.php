@@ -219,6 +219,7 @@
         Route::post('/quality-inspections/{qualityInspection}/pass', [QualityInspectionController::class, 'pass']);
 
         Route::get('/packing', [PackingController::class, 'index']);
+        Route::get('/packing/export', [PackingController::class, 'export']);
         Route::put('/packing/{packing}', [PackingController::class, 'update']);
 
         Route::get('/production/batches', [ProductionController::class, 'batches']);
@@ -275,6 +276,14 @@
         Route::get('/reports/rejections', [ReportController::class, 'rejections']);
         Route::get('/reports/most-selling-products', [ReportController::class, 'mostSellingProducts']);
         Route::get('/reports/machine-active-work', [ReportController::class, 'machineActiveWork']);
+        Route::get('/reports/machine-processing-history', [ReportController::class, 'machineProcessingHistory']);
+        Route::get('/reports/machine-processing-history/export', [ReportController::class, 'machineProcessingHistoryExport']);
+        Route::get('/reports/item-production-history', [ReportController::class, 'itemProductionHistory']);
+        Route::get('/reports/item-production-history/export', [ReportController::class, 'itemProductionHistoryExport']);
+        Route::get('/reports/raw-material-history', [ReportController::class, 'rawMaterialHistory']);
+        Route::get('/reports/raw-material-history/export', [ReportController::class, 'rawMaterialHistoryExport']);
+        Route::get('/reports/client-production-history', [ReportController::class, 'clientProductionHistory']);
+        Route::get('/reports/client-production-history/export', [ReportController::class, 'clientProductionHistoryExport']);
 
         Route::get('/notifications', [NotificationController::class, 'index']);
         Route::post('/notifications', [NotificationController::class, 'store']);

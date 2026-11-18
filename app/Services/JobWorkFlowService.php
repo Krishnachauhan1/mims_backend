@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\InventoryController;
 use App\Models\FinishedGood;
 use App\Models\InventoryTransaction;
 use App\Models\JobWork;
+use App\Models\Process;
 use App\Models\ProductionBatch;
 use App\Models\User;
 use App\Models\WorkOrder;
@@ -52,14 +53,59 @@ class JobWorkFlowService
             return true;
         }
 
+        if ((int) ($stage['vendor_id'] ?? 0) > 0) {
+            return true;
+        }
+
         $processType = strtolower(str_replace([' ', '-'], '_', (string) ($stage['process_type'] ?? '')));
         if ($processType === 'job_work') {
             return true;
         }
 
-        $name = strtolower(trim((string) ($stage['name'] ?? '')));
+        foreach (['name', 'machine_name'] as $key) {
+            if ($this->isJobWorkProcessName($stage[$key] ?? null)) {
+                return true;
+            }
+        }
 
-        return $name === 'job work' || str_contains($name, 'job work');
+        return false;
+    }
+
+    /**
+     * Matches Flutter AppDataRegistry.isJobWorkProcessName — process master or "job work" label.
+     */
+    public function isJobWorkProcessName(mixed $name): bool
+    {
+        $label = trim((string) ($name ?? ''));
+        if ($label === '') {
+            return false;
+        }
+
+        $lower = strtolower($label);
+        if ($lower === 'job work' || str_contains($lower, 'job work')) {
+            return true;
+        }
+
+        if (str_contains($lower, 'outsource') || str_contains($lower, 'outsourced')) {
+            return true;
+        }
+
+        $normalized = strtolower(str_replace(' ', '_', $label));
+        if ($normalized === 'job_work' || str_contains($normalized, 'jobwork')) {
+            return true;
+        }
+
+        $process = Process::query()
+            ->whereRaw('LOWER(TRIM(name)) = ?', [$lower])
+            ->first();
+
+        if ($process === null) {
+            return false;
+        }
+
+        $type = strtolower(str_replace([' ', '-'], '_', (string) ($process->process_type ?? '')));
+
+        return $type === 'job_work';
     }
 
     public function isBatchAtJobWorkStage(ProductionBatch $batch): bool
@@ -72,9 +118,7 @@ class JobWorkFlowService
             return true;
         }
 
-        $currentName = strtolower(trim((string) $batch->current_stage));
-
-        return $currentName === 'job work' || str_contains($currentName, 'job work');
+        return $this->isJobWorkProcessName($batch->current_stage);
     }
 
     public function flowState(ProductionBatch $batch): string

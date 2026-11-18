@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Machinery;
 use App\Models\ProductionBatch;
 use App\Models\WorkOrder;
+use App\Support\BatchRouteStages;
 
 class BatchStageMachineService
 {
@@ -93,23 +94,7 @@ class BatchStageMachineService
         ProductionBatch $batch,
         array $workOrdersById = [],
     ): array {
-        $stages = [];
-
-        if ($batch->work_order_id) {
-            $orderId = (int) $batch->work_order_id;
-            $order = $workOrdersById[$orderId] ?? WorkOrder::query()->find($orderId);
-            $orderStages = $order?->stages ?? [];
-            if (is_array($orderStages) && $orderStages !== []) {
-                $stages = $orderStages;
-            }
-        }
-
-        if ($stages === []) {
-            $workflowStages = $batch->workflow?->stages ?? [];
-            if (is_array($workflowStages) && $workflowStages !== []) {
-                $stages = $workflowStages;
-            }
-        }
+        $stages = BatchRouteStages::resolveForBatch($batch);
 
         if ($stages === []) {
             return [];

@@ -38,4 +38,35 @@ class MrnNumberService
 
         return $transaction->fresh();
     }
+
+    /**
+     * MRN is issued only after physical receipt (first receive qty > 0).
+     */
+    public function ensureMrnWhenReceived(InventoryTransaction $transaction): InventoryTransaction
+    {
+        if ($this->receivedQuantity($transaction) < 1) {
+            return $transaction;
+        }
+
+        return $this->ensureMrnNumber($transaction);
+    }
+
+    public function receivedQuantity(InventoryTransaction $transaction): int
+    {
+        $total = max(0, (int) $transaction->quantity);
+        $items = $transaction->items;
+        if (! is_array($items)) {
+            return $total;
+        }
+
+        $fromLines = 0;
+        foreach ($items as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+            $fromLines += max(0, (int) ($item['received_quantity'] ?? 0));
+        }
+
+        return max($total, $fromLines);
+    }
 }

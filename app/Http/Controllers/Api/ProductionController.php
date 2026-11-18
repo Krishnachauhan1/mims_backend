@@ -239,9 +239,13 @@ class ProductionController extends Controller
 
         $stages = $this->resolveStagesForBatch($batch);
         $stageOrder = max(1, (int) $batch->stage_order);
+        $totalStages = \App\Support\BatchRouteStages::totalStageCount($batch);
 
         if ($data['direction'] === 'forward') {
-            $stageOrder = min(max(1, (int) $batch->total_stages), $stageOrder + 1);
+            if ($stageOrder >= $totalStages) {
+                throw new HttpException(422, 'Already at the final stage');
+            }
+            $stageOrder = min($totalStages, $stageOrder + 1);
         } else {
             $stageOrder = max(1, $stageOrder - 1);
         }
@@ -250,6 +254,7 @@ class ProductionController extends Controller
 
         $batch->update([
             'stage_order' => $stageOrder,
+            'total_stages' => $totalStages,
             'current_stage_index' => $stageOrder - 1,
             'current_stage' => $currentStage,
             'stage_started_at' => now(),
@@ -271,7 +276,8 @@ class ProductionController extends Controller
     ): array {
         $stages = $this->resolveStagesForBatch($batch);
         $stageOrder = max(1, (int) $batch->stage_order);
-        $nextStageOrder = min(max(1, (int) $batch->total_stages), $stageOrder + 1);
+        $totalStages = \App\Support\BatchRouteStages::totalStageCount($batch);
+        $nextStageOrder = min($totalStages, $stageOrder + 1);
         $currentStageName = $stages[$stageOrder - 1]['name'] ?? $batch->current_stage;
         $nextStageName = $stages[$nextStageOrder - 1]['name'] ?? $batch->current_stage;
         $operator = $user?->name ?? 'Operator';
@@ -488,13 +494,17 @@ class ProductionController extends Controller
             throw new HttpException(422, 'Batch is already completed');
         }
 
+        $completedAt = now();
+        $closedHistory = $this->closeOpenStageHistoryEntries($batch, $completedAt);
+
         $batch->update([
             'status' => 'completed',
-            'completed_at' => now(),
+            'completed_at' => $completedAt,
             'stage_order' => $batch->total_stages,
             'current_stage_index' => max(0, $batch->total_stages - 1),
             'awaiting_final_completion_at' => null,
             'last_completion_reminder_at' => null,
+            'stage_history' => $closedHistory,
         ]);
 
         $batch = $batch->fresh('workflow');
@@ -1571,9 +1581,7 @@ class ProductionController extends Controller
             // Fall through to the stage-name check.
         }
 
-        $currentName = strtolower(trim((string) ($batch->current_stage ?? '')));
-
-        return $currentName === 'job work' || str_contains($currentName, 'job work');
+        return $this->jobWorkFlow->isJobWorkProcessName($batch->current_stage ?? null);
     }
 
     /**
@@ -1595,8 +1603,7 @@ class ProductionController extends Controller
             // Use current_stage from the raw row.
         }
 
-        $currentName = strtolower(trim((string) ($row->current_stage ?? '')));
-        $isJobWorkStage = $currentName === 'job work' || str_contains($currentName, 'job work');
+        $isJobWorkStage = $this->jobWorkFlow->isJobWorkProcessName($row->current_stage ?? null);
 
         return [$isJobWorkStage ? 'ready_to_send' : 'not_job_work', $isJobWorkStage];
     }
@@ -1659,6 +1666,7 @@ class ProductionController extends Controller
             'reviewed_by_name' => $request->reviewed_by_name,
             'reviewed_at' => $request->reviewed_at?->format('Y-m-d H:i'),
             'created_at' => $request->created_at?->format('Y-m-d H:i'),
+            'requested_at' => $request->created_at?->format('Y-m-d H:i'),
         ];
 
         if ($includeBatch) {
@@ -1691,6 +1699,41 @@ class ProductionController extends Controller
         }
 
         return $payload;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function closeOpenStageHistoryEntries(
+        ProductionBatch $batch,
+        \DateTimeInterface $completedAt,
+    ): array {
+        $history = array_values($batch->stage_history ?? []);
+        if ($history === []) {
+            return $history;
+        }
+
+        $stamp = $completedAt->format('Y-m-d H:i');
+        foreach ($history as $index => $entry) {
+            if (! is_array($entry)) {
+                continue;
+            }
+
+            $completedRaw = $entry['completed'] ?? $entry['completed_at'] ?? null;
+            $isOpen = $completedRaw === null
+                || (is_string($completedRaw) && trim($completedRaw) === '');
+
+            if (! $isOpen) {
+                continue;
+            }
+
+            $history[$index]['completed'] = $stamp;
+            if (empty($history[$index]['duration']) || $history[$index]['duration'] === '—') {
+                $history[$index]['duration'] = '—';
+            }
+        }
+
+        return $history;
     }
 
     private function formatTransaction(\App\Models\InventoryTransaction $transaction): array

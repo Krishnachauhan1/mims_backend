@@ -13,7 +13,9 @@ use App\Models\Workflow;
 use App\Services\AppNotificationService;
 use App\Services\MaterialSpecResolver;
 use App\Services\TaskMaterialService;
+use App\Support\BatchRouteStages;
 use App\Support\DisplayValue;
+use App\Support\RouteStageEditGuard;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -268,6 +270,10 @@ class WorkOrderController extends Controller
             ], 422);
         }
 
+        if ($blocked = $this->rejectLockedRouteStageEdits($batch, $stages)) {
+            return $blocked;
+        }
+
         return $this->updateRouteForProductionBatch(
             $workOrder,
             (int) $batch->id,
@@ -342,6 +348,10 @@ class WorkOrderController extends Controller
 
         if ($targetBatchId !== null && $targetBatchId > 0) {
             return $this->updateRouteForProductionBatch($workOrder, $targetBatchId, $stages, $validated);
+        }
+
+        if ($blocked = $this->rejectLockedRouteStageEditsForWorkOrder($workOrder, $stages)) {
+            return $blocked;
         }
 
         if ($this->workOrderHasActiveQuantitySplits($workOrder)) {
@@ -1030,6 +1040,10 @@ class WorkOrderController extends Controller
             ], 422);
         }
 
+        if ($blocked = $this->rejectLockedRouteStageEdits($batch, $stages)) {
+            return $blocked;
+        }
+
         if (! Schema::hasColumn('production_batches', 'route_stages')) {
             return response()->json([
                 'message' => 'Server migration required: route_stages on production_batches.',
@@ -1084,6 +1098,47 @@ class WorkOrderController extends Controller
      * Partial forward creates multiple active batches on one route card — route edits
      * must not overwrite each line's quantity with the work order total.
      */
+    /**
+     * @param  array<int, array<string, mixed>>  $newStages
+     */
+    private function rejectLockedRouteStageEdits(
+        ProductionBatch $batch,
+        array $newStages,
+    ): ?JsonResponse {
+        $currentStages = BatchRouteStages::resolveForBatch($batch);
+        $message = RouteStageEditGuard::validate($batch, $currentStages, $newStages);
+        if ($message === null) {
+            return null;
+        }
+
+        return response()->json(['message' => $message], 422);
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $newStages
+     */
+    private function rejectLockedRouteStageEditsForWorkOrder(
+        WorkOrder $workOrder,
+        array $newStages,
+    ): ?JsonResponse {
+        $batches = ProductionBatch::query()
+            ->where('work_order_id', $workOrder->id)
+            ->where('status', '!=', 'completed')
+            ->get();
+
+        if ($batches->isEmpty()) {
+            return null;
+        }
+
+        foreach ($batches as $batch) {
+            if ($blocked = $this->rejectLockedRouteStageEdits($batch, $newStages)) {
+                return $blocked;
+            }
+        }
+
+        return null;
+    }
+
     private function workOrderHasActiveQuantitySplits(WorkOrder $workOrder): bool
     {
         $activeBatchIds = ProductionBatch::query()

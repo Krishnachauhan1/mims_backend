@@ -92,16 +92,12 @@ class CheckinController extends Controller
                     'user_id' => $request->user()?->id ?? $existing->user_id,
                 ];
 
-                if (! filled($existing->mrn_number)) {
-                    $updates['mrn_number'] = $this->mrnNumbers->nextMrnNumber();
-                }
-
                 $existing->update($updates);
 
-                return $existing->fresh();
+                return $this->mrnNumbers->ensureMrnWhenReceived($existing->fresh());
             }
 
-            return InventoryTransaction::create([
+            $created = InventoryTransaction::create([
                 'type' => 'checkin',
                 'po_number' => $data['po_number'],
                 'flow_source' => 'purchase_order',
@@ -111,13 +107,14 @@ class CheckinController extends Controller
                 'unit' => 'mixed',
                 'batch_number' => $data['batch_number'] ?? $data['po_number'],
                 'pr_number' => $data['pr_number'] ?? null,
-                'mrn_number' => $this->mrnNumbers->nextMrnNumber(),
                 'items' => $items,
                 'notes' => $data['notes'] ?? null,
                 'status' => $phase,
                 'receipt_phase' => $phase,
                 'user_id' => $request->user()?->id,
             ]);
+
+            return $this->mrnNumbers->ensureMrnWhenReceived($created->fresh());
         });
 
         return response()->json($this->format($transaction));
@@ -223,7 +220,12 @@ class CheckinController extends Controller
                 'user_id' => $request->user()?->id ?? $transaction->user_id,
             ]);
 
-            return $transaction->fresh();
+            $fresh = $transaction->fresh();
+            if ($receivedNow > 0) {
+                return $this->mrnNumbers->ensureMrnWhenReceived($fresh);
+            }
+
+            return $fresh;
         });
 
         return response()->json($this->format($transaction));
@@ -279,7 +281,7 @@ class CheckinController extends Controller
                 'user_id' => $request->user()?->id ?? $transaction->user_id,
             ]);
 
-            return $transaction->fresh();
+            return $this->mrnNumbers->ensureMrnWhenReceived($transaction->fresh());
         });
 
         return response()->json($this->format($transaction));

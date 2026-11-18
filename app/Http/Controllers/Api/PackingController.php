@@ -7,15 +7,18 @@ use App\Models\Document;
 use App\Models\PackingEntry;
 use App\Services\PackingService;
 use App\Services\PermissionService;
+use App\Services\SpreadsheetService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class PackingController extends Controller
 {
     public function __construct(
         private PackingService $packingService,
         private PermissionService $permissions,
+        private SpreadsheetService $spreadsheet,
     ) {}
 
     public function index(Request $request): JsonResponse
@@ -26,37 +29,7 @@ class PackingController extends Controller
 
         $this->packingService->syncFromPassedProductionInspections();
 
-        $query = PackingEntry::query()
-            ->with(['workOrder', 'qualityInspection'])
-            ->latest('inspected_at')
-            ->latest('id');
-
-        $status = trim((string) $request->string('status', ''));
-        if ($status !== '' && $status !== 'all') {
-            if ($status === 'hold') {
-                $query->where(function ($builder): void {
-                    $builder
-                        ->where('status', 'hold')
-                        ->orWhere('hold_qty', '>', 0);
-                });
-            } else {
-                $query->where('status', $status);
-            }
-        }
-
-        $search = trim((string) $request->string('search', ''));
-        if ($search !== '') {
-            $query->where(function ($builder) use ($search): void {
-                $builder
-                    ->where('batch_number', 'like', "%{$search}%")
-                    ->orWhere('product_name', 'like', "%{$search}%")
-                    ->orWhere('item_name', 'like', "%{$search}%")
-                    ->orWhere('item_code', 'like', "%{$search}%")
-                    ->orWhere('client_name', 'like', "%{$search}%");
-            });
-        }
-
-        $rows = $query->get();
+        $rows = $this->packingListQuery($request)->get();
         $entries = $rows->map(fn (PackingEntry $entry) => $this->format($entry));
 
         return response()->json([
@@ -74,6 +47,82 @@ class PackingController extends Controller
                 'packed' => $entries->where('status', 'packed')->count(),
             ],
         ]);
+    }
+
+    public function export(Request $request): StreamedResponse|JsonResponse
+    {
+        if (! $this->userCanAccess($request)) {
+            return response()->json(['message' => 'Forbidden'], 403);
+        }
+
+        $this->packingService->syncFromPassedProductionInspections();
+
+        $entries = $this->packingListQuery($request)->get();
+        if ($entries->isEmpty()) {
+            return response()->json(['message' => 'No packing records to export'], 422);
+        }
+
+        $headers = [
+            'Batch',
+            'Route Card',
+            'Item Code',
+            'Product',
+            'Client',
+            'Total Qty',
+            'Packed Qty',
+            'Rejected Qty',
+            'Hold Qty',
+            'Remaining Qty',
+            'Unit',
+            'Status',
+            'QC Passed By',
+            'QC Passed At',
+            'Packed By',
+            'Packed At',
+            'Hold Reason',
+            'Reject Reason',
+            'Packing Notes',
+            'Report Files',
+            'Last Action By',
+            'Last Action At',
+            'Created At',
+        ];
+
+        $rows = $entries->map(function (PackingEntry $entry) {
+            $formatted = $this->format($entry);
+            $attachments = (int) ($formatted['attachment_count'] ?? 0);
+
+            return [
+                'Batch' => $formatted['batch_number'] ?? '',
+                'Route Card' => $formatted['route_card_no'] ?? '',
+                'Item Code' => $formatted['item_code'] ?? '',
+                'Product' => $formatted['product_name'] ?? '',
+                'Client' => $formatted['client_name'] ?? '',
+                'Total Qty' => (string) ($formatted['quantity'] ?? ''),
+                'Packed Qty' => (string) ($formatted['packed_qty'] ?? ''),
+                'Rejected Qty' => (string) ($formatted['rejected_qty'] ?? ''),
+                'Hold Qty' => (string) ($formatted['hold_qty'] ?? ''),
+                'Remaining Qty' => (string) ($formatted['remaining_qty'] ?? ''),
+                'Unit' => $formatted['unit'] ?? '',
+                'Status' => $formatted['status'] ?? '',
+                'QC Passed By' => $formatted['inspected_by'] ?? '',
+                'QC Passed At' => $formatted['inspected_at'] ?? '',
+                'Packed By' => $formatted['packed_by'] ?? '',
+                'Packed At' => $formatted['packed_at'] ?? '',
+                'Hold Reason' => $formatted['hold_reason'] ?? '',
+                'Reject Reason' => $formatted['reject_reason'] ?? '',
+                'Packing Notes' => $formatted['notes'] ?? '',
+                'Report Files' => $attachments > 0 ? "{$attachments} file(s)" : 'None',
+                'Last Action By' => $formatted['action_by'] ?? '',
+                'Last Action At' => $formatted['action_at'] ?? '',
+                'Created At' => $formatted['created_at'] ?? '',
+            ];
+        })->values()->all();
+
+        $status = trim((string) $request->string('status', 'all'));
+        $filename = 'packing_report_'.$status.'_'.now()->format('Y-m-d_His').'.xlsx';
+
+        return $this->spreadsheet->xlsxDownload($filename, $headers, $rows);
     }
 
     public function update(Request $request, PackingEntry $packing): JsonResponse
@@ -260,6 +309,44 @@ class PackingController extends Controller
             },
             'data' => $this->format($packing),
         ]);
+    }
+
+    /**
+     * @return \Illuminate\Database\Eloquent\Builder<PackingEntry>
+     */
+    private function packingListQuery(Request $request)
+    {
+        $query = PackingEntry::query()
+            ->with(['workOrder', 'qualityInspection'])
+            ->latest('inspected_at')
+            ->latest('id');
+
+        $status = trim((string) $request->string('status', ''));
+        if ($status !== '' && $status !== 'all') {
+            if ($status === 'hold') {
+                $query->where(function ($builder): void {
+                    $builder
+                        ->where('status', 'hold')
+                        ->orWhere('hold_qty', '>', 0);
+                });
+            } else {
+                $query->where('status', $status);
+            }
+        }
+
+        $search = trim((string) $request->string('search', ''));
+        if ($search !== '') {
+            $query->where(function ($builder) use ($search): void {
+                $builder
+                    ->where('batch_number', 'like', "%{$search}%")
+                    ->orWhere('product_name', 'like', "%{$search}%")
+                    ->orWhere('item_name', 'like', "%{$search}%")
+                    ->orWhere('item_code', 'like', "%{$search}%")
+                    ->orWhere('client_name', 'like', "%{$search}%");
+            });
+        }
+
+        return $query;
     }
 
     private function userCanAccess(Request $request): bool
