@@ -1,6 +1,18 @@
 {
   "version": 1,
   "description": "Single source of truth \u2014 employees, permissions, roles, sidebar. Edit this file only.",
+  "mobile_app": {
+    "min_version_name": "1.0.0",
+    "min_build_number": 1,
+    "android_store_url": "",
+    "ios_store_url": "",
+    "title_en": "Update required",
+    "title_hi": "अपडेट आवश्यक",
+    "message_en": "Your app version is outdated. Please update the application; otherwise it will not work properly.",
+    "message_hi": "आपका ऐप पुराना है। कृपया एप्लिकेशन अपडेट करें, नहीं तो यह ठीक से काम नहीं करेगा।",
+    "update_button_en": "Update app",
+    "update_button_hi": "ऐप अपडेट करें"
+  },
   "access_control": {
     "version": 1,
     "description": "Edit this file to add modules, permissions, roles, or sidebar items without changing Dart code. Restart app after changes. API endpoint /access-control/config can override this at runtime.",

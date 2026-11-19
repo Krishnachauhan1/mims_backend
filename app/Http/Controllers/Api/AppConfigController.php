@@ -17,6 +17,7 @@ class AppConfigController extends Controller
         return response()->json([
             'version' => $config['version'] ?? 1,
             'description' => $config['description'] ?? null,
+            'mobile_app' => $config['mobile_app'] ?? [],
             'access_control' => $config['access_control'] ?? [],
             'permission_flow' => $config['permission_flow'] ?? [],
             'job_designations' => $config['job_designations'] ?? [],
