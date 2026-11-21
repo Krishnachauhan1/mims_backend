@@ -69,6 +69,89 @@ class WorkOrderController extends Controller
         );
     }
 
+    public function history(WorkOrder $workOrder): JsonResponse
+    {
+        $batches = ProductionBatch::query()
+            ->where('work_order_id', $workOrder->id)
+            ->orderByDesc('id')
+            ->get();
+
+        $batchRows = [];
+        $timeline = [];
+
+        foreach ($batches as $batch) {
+            $history = is_array($batch->stage_history) ? $batch->stage_history : [];
+            $batchRows[] = [
+                'id' => (int) $batch->id,
+                'batch_number' => (string) $batch->batch_number,
+                'status' => (string) ($batch->status ?? 'in_progress'),
+                'quantity' => (int) ($batch->quantity ?? 0),
+                'unit' => (string) ($batch->unit ?? 'pcs'),
+                'current_stage' => (string) ($batch->current_stage ?? '—'),
+                'stage_order' => (int) ($batch->stage_order ?? 1),
+                'total_stages' => (int) ($batch->total_stages ?? 1),
+                'started_at' => $batch->started_at?->format('Y-m-d H:i')
+                    ?? $batch->created_at?->format('Y-m-d H:i'),
+                'completed_at' => $batch->completed_at?->format('Y-m-d H:i'),
+                    ?? ($batch->status === 'completed' ? $batch->updated_at?->format('Y-m-d H:i') : null),
+                'stage_history' => $history,
+            ];
+
+            foreach ($history as $entry) {
+                if (! is_array($entry)) {
+                    continue;
+                }
+                $timeline[] = [
+                    'batch_id' => (int) $batch->id,
+                    'batch_number' => (string) $batch->batch_number,
+                    'stage' => (string) ($entry['stage'] ?? '—'),
+                    'user' => (string) ($entry['user'] ?? '—'),
+                    'started' => $entry['started'] ?? $entry['started_at'] ?? null,
+                    'assigned_at' => $entry['assigned_at'] ?? null,
+                    'completed' => $entry['completed'] ?? $entry['completed_at'] ?? null,
+                    'duration' => $entry['duration'] ?? null,
+                    'batch_status' => (string) ($batch->status ?? ''),
+                ];
+            }
+        }
+
+        usort($timeline, function (array $left, array $right): int {
+            $leftAt = $this->historySortTimestamp($left);
+            $rightAt = $this->historySortTimestamp($right);
+
+            return $rightAt <=> $leftAt;
+        });
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'work_order' => $this->format($workOrder),
+                'batches' => $batchRows,
+                'timeline' => $timeline,
+                'batch_count' => count($batchRows),
+                'generated_at' => now()->format('Y-m-d H:i'),
+            ],
+        ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $entry
+     */
+    private function historySortTimestamp(array $entry): int
+    {
+        foreach (['completed', 'completed_at', 'started', 'started_at', 'assigned_at'] as $key) {
+            $raw = $entry[$key] ?? null;
+            if ($raw === null || trim((string) $raw) === '') {
+                continue;
+            }
+            $ts = strtotime((string) $raw);
+
+            return $ts !== false ? $ts : 0;
+        }
+
+        return 0;
+    }
+
     public function manufacturedProducts(): JsonResponse
     {
         $byProduct = [];

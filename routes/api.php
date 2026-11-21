@@ -185,6 +185,7 @@
         Route::delete('/workflows/{workflow}', [WorkflowController::class, 'destroy']);
 
         Route::get('/work-orders', [WorkOrderController::class, 'index']);
+        Route::get('/work-orders/{workOrder}/history', [WorkOrderController::class, 'history']);
         Route::get('/work-orders/manufactured-products', [WorkOrderController::class, 'manufacturedProducts']);
         Route::post('/work-orders', [WorkOrderController::class, 'store']);
         Route::put('/work-orders/{workOrder}', [WorkOrderController::class, 'update']);
