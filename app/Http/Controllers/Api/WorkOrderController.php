@@ -92,7 +92,7 @@ class WorkOrderController extends Controller
                 'total_stages' => (int) ($batch->total_stages ?? 1),
                 'started_at' => $batch->started_at?->format('Y-m-d H:i')
                     ?? $batch->created_at?->format('Y-m-d H:i'),
-                'completed_at' => $batch->completed_at?->format('Y-m-d H:i'),
+                'completed_at' => $batch->completed_at?->format('Y-m-d H:i')
                     ?? ($batch->status === 'completed' ? $batch->updated_at?->format('Y-m-d H:i') : null),
                 'stage_history' => $history,
             ];
