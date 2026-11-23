@@ -283,6 +283,8 @@
         Route::get('/reports/item-production-history/export', [ReportController::class, 'itemProductionHistoryExport']);
         Route::get('/reports/raw-material-history', [ReportController::class, 'rawMaterialHistory']);
         Route::get('/reports/raw-material-history/export', [ReportController::class, 'rawMaterialHistoryExport']);
+        Route::get('/reports/raw-material-route-allocation', [ReportController::class, 'rawMaterialRouteAllocation']);
+        Route::get('/reports/raw-material-route-allocation/export', [ReportController::class, 'rawMaterialRouteAllocationExport']);
         Route::get('/reports/client-production-history', [ReportController::class, 'clientProductionHistory']);
         Route::get('/reports/client-production-history/export', [ReportController::class, 'clientProductionHistoryExport']);
 
