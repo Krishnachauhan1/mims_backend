@@ -560,12 +560,22 @@ class ReportController extends Controller
         array $inventoryIds,
         string $needle,
     ): array {
-        if ($inventoryIds === []) {
-            return [];
+        if ($inventoryIds === [] && $inventoryItems->isNotEmpty()) {
+            $inventoryIds = $inventoryItems
+                ->pluck('id')
+                ->map(fn ($id) => (int) $id)
+                ->values()
+                ->all();
         }
 
         /** @var array<int, array<string, mixed>> $usage */
         $usage = [];
+
+        if ($inventoryIds === []) {
+            return $this->sortRawMaterialUsageHistory(
+                $this->checkoutsAsUsageHistoryByMaterialName($inventoryItems, $needle),
+            );
+        }
 
         $requisitions = MaterialRequisition::query()
             ->whereIn('inventory_item_id', $inventoryIds)
@@ -765,11 +775,154 @@ class ReportController extends Controller
             }
         }
 
+        return $this->sortRawMaterialUsageHistory($usage);
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $usage
+     * @return array<int, array<string, mixed>>
+     */
+    private function sortRawMaterialUsageHistory(array $usage): array
+    {
         usort($usage, function (array $left, array $right): int {
             return strcmp((string) ($right['since_at'] ?? ''), (string) ($left['since_at'] ?? ''));
         });
 
         return array_values($usage);
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, InventoryItem>  $inventoryItems
+     * @return array<int, array<string, mixed>>
+     */
+    private function inventoryLocationsAsUsageHistory(\Illuminate\Support\Collection $inventoryItems): array
+    {
+        $usage = [];
+
+        foreach ($inventoryItems as $item) {
+            $qty = (int) $item->quantity;
+            if ($qty <= 0) {
+                continue;
+            }
+
+            $location = filled($item->location)
+                ? (string) $item->location
+                : 'Warehouse';
+
+            $usage[] = [
+                'kind' => 'material_at',
+                'location' => $location,
+                'quantity' => $qty,
+                'unit' => (string) ($item->unit ?? 'pcs'),
+                'status' => (string) ($item->status ?? 'in_stock'),
+                'since_at' => $this->safeReportDateTime($item->updated_at ?? $item->created_at),
+                'reference' => trim(implode(' · ', array_filter([
+                    filled($item->batch_number) ? 'Batch '.$item->batch_number : null,
+                    filled($item->sku) ? 'SKU '.$item->sku : null,
+                ]))) ?: null,
+            ];
+        }
+
+        return $usage;
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $routeAllocations
+     * @return array<int, array<string, mixed>>
+     */
+    private function routeAllocationsAsUsageHistory(array $routeAllocations): array
+    {
+        $usage = [];
+
+        foreach ($routeAllocations as $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+
+            $usage[] = [
+                'kind' => 'route_allocation',
+                'location' => filled($row['route_card_no'] ?? null)
+                    ? 'Route '.$row['route_card_no']
+                    : 'Route card',
+                'quantity' => (float) ($row['allocated_quantity'] ?? 0),
+                'unit' => (string) ($row['unit'] ?? 'pcs'),
+                'status' => (string) ($row['work_order_status'] ?? 'assigned'),
+                'since_at' => $this->safeReportDateTime($row['assigned_at'] ?? null),
+                'item_code' => filled($row['item_code'] ?? null) ? (string) $row['item_code'] : null,
+                'route_card_no' => filled($row['route_card_no'] ?? null)
+                    ? (string) $row['route_card_no']
+                    : null,
+                'reference' => trim(implode(' · ', array_filter([
+                    filled($row['client_name'] ?? null) ? 'Client '.$row['client_name'] : null,
+                    filled($row['product'] ?? null) && ($row['product'] ?? '') !== ($row['item_code'] ?? '')
+                        ? (string) $row['product']
+                        : null,
+                    filled($row['floor_location'] ?? null)
+                        ? 'On floor: '.$row['floor_location']
+                        : null,
+                    filled($row['batch_number'] ?? null) ? 'Batch '.$row['batch_number'] : null,
+                ]))) ?: null,
+            ];
+        }
+
+        return $usage;
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, InventoryItem>  $inventoryItems
+     * @return array<int, array<string, mixed>>
+     */
+    private function checkoutsAsUsageHistoryByMaterialName(
+        \Illuminate\Support\Collection $inventoryItems,
+        string $needle,
+    ): array {
+        /** @var array<int, array<string, mixed>> $usage */
+        $usage = [];
+
+        $checkouts = InventoryTransaction::query()
+            ->where('type', 'checkout')
+            ->orderByDesc('id')
+            ->limit(600)
+            ->get();
+
+        foreach ($checkouts as $checkout) {
+            $items = is_array($checkout->items) ? $checkout->items : [];
+            $matchedLines = [];
+            if ($items !== []) {
+                foreach ($items as $line) {
+                    if (is_array($line) && $this->checkinLineMatchesRawMaterial($line, $inventoryItems, $needle)) {
+                        $matchedLines[] = $line;
+                    }
+                }
+            } elseif ($this->transactionMatchesRawMaterial($checkout, $inventoryItems, $needle)) {
+                $matchedLines[] = [
+                    'item_name' => $checkout->material_name,
+                    'quantity' => $checkout->quantity,
+                    'unit' => $checkout->unit,
+                ];
+            }
+
+            foreach ($matchedLines as $line) {
+                $qty = (int) ($line['dispatched_quantity'] ?? $line['quantity'] ?? 0);
+                if ($qty <= 0) {
+                    continue;
+                }
+
+                $usage[] = [
+                    'kind' => 'checkout_dispatch',
+                    'location' => filled($checkout->destination)
+                        ? (string) $checkout->destination
+                        : 'Checkout',
+                    'quantity' => $qty,
+                    'unit' => (string) ($line['unit'] ?? $checkout->unit ?? 'pcs'),
+                    'status' => (string) ($checkout->status ?? 'dispatched'),
+                    'since_at' => $this->safeReportDateTime($checkout->created_at),
+                    'reference' => (string) ($line['item_name'] ?? $checkout->material_name ?? ''),
+                ];
+            }
+        }
+
+        return $usage;
     }
 
     private function materialRequisitionLocationLabel(MaterialRequisition $requisition): string
@@ -1687,6 +1840,12 @@ class ReportController extends Controller
             $needle,
         );
 
+        $usageHistory = $this->sortRawMaterialUsageHistory(array_merge(
+            $usageHistory,
+            $this->inventoryLocationsAsUsageHistory($inventoryItems),
+            $this->routeAllocationsAsUsageHistory($routeAllocations),
+        ));
+
         $inventorySku = $inventoryItems
             ->pluck('sku')
             ->map(fn ($value) => trim((string) $value))
@@ -1715,8 +1874,8 @@ class ReportController extends Controller
         }
         $linkedItemCodes = array_values(array_unique($linkedItemCodes));
 
-        $resolvedItemCode = $inventorySku
-            ?: ($linkedItemCodes[0] ?? null);
+        $resolvedItemCode = $linkedItemCodes[0]
+            ?? ($this->isInternalMaterialBatchSku($inventorySku) ? null : $inventorySku);
 
         return [
             'summary' => [
@@ -1930,6 +2089,19 @@ class ReportController extends Controller
     /**
      * @param  array<string, mixed>  $line
      */
+    private function isInternalMaterialBatchSku(?string $sku): bool
+    {
+        if (! filled($sku)) {
+            return false;
+        }
+
+        $upper = strtoupper(trim($sku));
+
+        return str_contains($upper, '-PO')
+            || str_contains($upper, '-MRN')
+            || str_ends_with($upper, '-QC');
+    }
+
     private function rawMaterialLineUnitPrice(array $line): ?float
     {
         foreach (['unit_price', 'purchase_price', 'rate', 'price'] as $key) {
@@ -1990,7 +2162,7 @@ class ReportController extends Controller
      */
     private function checkinLineMatchesInventoryItem(array $line, InventoryItem $inventoryItem): bool
     {
-        $lineInventoryId = (int) ($line['inventory_id'] ?? 0);
+        $lineInventoryId = (int) ($line['inventory_id'] ?? $line['inventory_item_id'] ?? 0);
         if ($lineInventoryId > 0 && $lineInventoryId === (int) $inventoryItem->id) {
             return true;
         }
