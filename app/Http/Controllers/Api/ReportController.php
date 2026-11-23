@@ -448,18 +448,36 @@ class ReportController extends Controller
                 ->map(fn ($id) => (int) $id)
                 ->values()
                 ->all();
+            [$materialGrade, $materialDiameter] = $this->parseMaterialGradeDiameter($materialCode);
+            $materialNeedle = '%'.strtolower(trim($materialCode)).'%';
 
-            if ($inventoryIds !== []) {
-                $query->whereIn('inventory_item_id', $inventoryIds);
-            } else {
-                $needle = '%'.strtolower($materialCode).'%';
-                $query->where(function ($lineQuery) use ($needle): void {
-                    $lineQuery->whereHas('inventoryItem', function ($inventoryQuery) use ($needle): void {
-                        $inventoryQuery->whereRaw('LOWER(name) LIKE ?', [$needle])
-                            ->orWhereRaw('LOWER(COALESCE(sku, "")) LIKE ?', [$needle]);
-                    })->orWhereRaw('LOWER(COALESCE(grade, "")) LIKE ?', [$needle]);
+            $query->where(function ($materialQuery) use (
+                $inventoryIds,
+                $materialGrade,
+                $materialDiameter,
+                $materialNeedle,
+            ): void {
+                if ($inventoryIds !== []) {
+                    $materialQuery->whereIn('inventory_item_id', $inventoryIds);
+                }
+
+                if ($materialGrade !== null && $materialDiameter !== null) {
+                    $method = $inventoryIds === [] ? 'where' : 'orWhere';
+                    $materialQuery->{$method}(function ($gradeQuery) use ($materialGrade, $materialDiameter): void {
+                        $gradeQuery
+                            ->whereRaw('LOWER(TRIM(COALESCE(grade, ""))) = ?', [strtolower($materialGrade)])
+                            ->whereRaw('ABS(COALESCE(diameter_mm, 0) - ?) < 0.05', [$materialDiameter]);
+                    });
+                }
+
+                $materialQuery->orWhereHas('inventoryItem', function ($inventoryQuery) use ($materialNeedle): void {
+                    $inventoryQuery->where('type', 'raw_material')
+                        ->where(function ($nameQuery) use ($materialNeedle): void {
+                            $nameQuery->whereRaw('LOWER(COALESCE(name, "")) LIKE ?', [$materialNeedle])
+                                ->orWhereRaw('LOWER(COALESCE(sku, "")) LIKE ?', [$materialNeedle]);
+                        });
                 });
-            }
+            });
         }
 
         if ($itemCode !== '') {
@@ -729,8 +747,22 @@ class ReportController extends Controller
             }
         }
 
+        [$usageGrade, $usageDiameter] = $this->parseMaterialGradeDiameter($needle);
         $workOrderIds = WorkOrderMaterial::query()
-            ->whereIn('inventory_item_id', $inventoryIds)
+            ->where(function ($materialQuery) use ($inventoryIds, $usageGrade, $usageDiameter): void {
+                if ($inventoryIds !== []) {
+                    $materialQuery->whereIn('inventory_item_id', $inventoryIds);
+                }
+
+                if ($usageGrade !== null && $usageDiameter !== null) {
+                    $method = $inventoryIds === [] ? 'where' : 'orWhere';
+                    $materialQuery->{$method}(function ($gradeQuery) use ($usageGrade, $usageDiameter): void {
+                        $gradeQuery
+                            ->whereRaw('LOWER(TRIM(COALESCE(grade, ""))) = ?', [strtolower($usageGrade)])
+                            ->whereRaw('ABS(COALESCE(diameter_mm, 0) - ?) < 0.05', [$usageDiameter]);
+                    });
+                }
+            })
             ->pluck('work_order_id')
             ->unique()
             ->values()
@@ -745,7 +777,7 @@ class ReportController extends Controller
                         ->orWhereNotNull('completed_at');
                 })
                 ->orderByDesc('id')
-                ->limit(120)
+                ->limit(400)
                 ->get();
 
             foreach ($completedBatches as $batch) {
@@ -1644,11 +1676,28 @@ class ReportController extends Controller
         $checkins = InventoryTransaction::query()
             ->where('type', 'checkin')
             ->orderByDesc('id')
-            ->limit(600)
+            ->limit(2500)
             ->get();
 
         foreach ($checkins as $checkin) {
             $items = is_array($checkin->items) ? $checkin->items : [];
+            if ($items === [] && $this->transactionMatchesRawMaterial($checkin, $inventoryItems, $needle)) {
+                $receivedHistory[] = [
+                    'received_at' => $this->safeReportDateTime($checkin->updated_at ?? $checkin->created_at),
+                    'quantity' => (int) ($checkin->quantity ?? 0),
+                    'unit' => (string) ($checkin->unit ?? 'pcs'),
+                    'item_name' => (string) ($checkin->material_name ?? $needle),
+                    'po_number' => $checkin->po_number,
+                    'mrn_number' => $checkin->mrn_number,
+                    'supplier' => $checkin->supplier,
+                    'checkin_id' => (int) $checkin->id,
+                    'unit_price' => null,
+                    'line_total' => null,
+                ];
+
+                continue;
+            }
+
             foreach ($items as $line) {
                 if (! is_array($line) || ! $this->checkinLineMatchesRawMaterial($line, $inventoryItems, $needle)) {
                     continue;
@@ -1846,6 +1895,18 @@ class ReportController extends Controller
             $this->routeAllocationsAsUsageHistory($routeAllocations),
         ));
 
+        $routeAllocations = $this->sortRouteAllocationsNewestFirst(
+            $this->supplementRouteAllocationsFromPastUsage($routeAllocations, $usageHistory),
+        );
+
+        $uniquePoNumbers = [];
+        foreach ($receivedHistory as $receivedRow) {
+            $po = trim((string) ($receivedRow['po_number'] ?? ''));
+            if ($po !== '') {
+                $uniquePoNumbers[$po] = true;
+            }
+        }
+
         $inventorySku = $inventoryItems
             ->pluck('sku')
             ->map(fn ($value) => trim((string) $value))
@@ -1892,6 +1953,7 @@ class ReportController extends Controller
                     ? implode(', ', array_map('strval', $locations))
                     : $primaryItem?->location,
                 'received_count' => count($receivedHistory),
+                'unique_po_count' => count($uniquePoNumbers),
                 'in_use_count' => count($inUse),
                 'usage_count' => count($usageHistory),
                 'route_allocation_count' => count($routeAllocations),
@@ -1911,6 +1973,106 @@ class ReportController extends Controller
      * @param  array<int, array<string, mixed>>  $rows
      * @return array<int, array<string, mixed>>
      */
+    /**
+     * @param  array<int, array<string, mixed>>  $routeAllocations
+     * @param  array<int, array<string, mixed>>  $usageHistory
+     * @return array<int, array<string, mixed>>
+     */
+    private function supplementRouteAllocationsFromPastUsage(
+        array $routeAllocations,
+        array $usageHistory,
+    ): array {
+        $seen = [];
+        foreach ($routeAllocations as $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+            $seen[$this->routeAllocationIdentityKey($row)] = true;
+        }
+
+        $supplements = [];
+
+        foreach ($usageHistory as $usage) {
+            if (! is_array($usage)) {
+                continue;
+            }
+
+            $kind = (string) ($usage['kind'] ?? '');
+            if (! in_array($kind, ['production_completed', 'batch_material', 'route_allocation', 'checkout_dispatch'], true)) {
+                continue;
+            }
+
+            $routeCardNo = trim((string) ($usage['route_card_no'] ?? ''));
+            if ($routeCardNo === '') {
+                if (preg_match('/Route\s+([^\s·]+)/i', (string) ($usage['reference'] ?? ''), $matches) === 1) {
+                    $routeCardNo = trim($matches[1]);
+                }
+            }
+
+            if ($routeCardNo === '' || $routeCardNo === '—') {
+                continue;
+            }
+
+            $itemCode = trim((string) ($usage['item_code'] ?? ''));
+            if ($itemCode === '' && preg_match('/Item\s+([^\s·]+)/i', (string) ($usage['reference'] ?? ''), $matches) === 1) {
+                $itemCode = trim($matches[1]);
+            }
+
+            $candidate = [
+                'route_card_no' => $routeCardNo,
+                'item_code' => $itemCode !== '' ? $itemCode : '—',
+                'product' => '—',
+                'client_name' => '',
+                'work_order_id' => 0,
+                'work_order_status' => (string) ($usage['status'] ?? 'completed'),
+                'order_quantity' => 0,
+                'raw_material_name' => '—',
+                'raw_material_sku' => '',
+                'grade' => '',
+                'diameter_mm' => null,
+                'allocated_quantity' => (int) ($usage['quantity'] ?? 0),
+                'unit' => (string) ($usage['unit'] ?? 'kg'),
+                'assigned_at' => (string) ($usage['since_at'] ?? ''),
+                'is_historical' => true,
+            ];
+
+            $key = $this->routeAllocationIdentityKey($candidate);
+            if (isset($seen[$key])) {
+                continue;
+            }
+
+            $seen[$key] = true;
+            $supplements[] = $candidate;
+        }
+
+        return array_merge($routeAllocations, $supplements);
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     */
+    private function routeAllocationIdentityKey(array $row): string
+    {
+        return strtolower(trim((string) ($row['route_card_no'] ?? '')))
+            .'|'
+            .strtolower(trim((string) ($row['item_code'] ?? '')))
+            .'|'
+            .strtolower(trim((string) ($row['assigned_at'] ?? '')));
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $rows
+     * @return array<int, array<string, mixed>>
+     */
+    private function sortRouteAllocationsNewestFirst(array $rows): array
+    {
+        usort($rows, function (array $left, array $right): int {
+            return strcmp((string) ($right['assigned_at'] ?? ''), (string) ($left['assigned_at'] ?? ''));
+        });
+
+        return array_values($rows);
+    }
+
     private function enrichRouteAllocationsWithActiveBatch(array $rows): array
     {
         if ($rows === []) {
