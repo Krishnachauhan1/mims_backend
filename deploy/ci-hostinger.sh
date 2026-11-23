@@ -133,7 +133,11 @@ do_sync() {
 do_postdeploy() {
   preflight_ssh
   local deploy_sha="${GITHUB_SHA:-}"
+  if [ -z "$deploy_sha" ] && command -v git >/dev/null 2>&1; then
+    deploy_sha="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+  fi
   echo "==> Composer, migrate, cache on server..."
+  echo "==> Deploy SHA: ${deploy_sha:-unknown}"
   ssh_cmd bash -s <<ENDSSH
 set -e
 cd ~/${REMOTE_DIR}

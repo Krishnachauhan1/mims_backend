@@ -59,6 +59,7 @@
                 'database' => 'connected',
                 'users' => User::count(),
                 'git_commit' => $deployCommit,
+                'report_history_revision' => 2,
             ]);
         } catch (\Throwable $e) {
             return response()->json([
