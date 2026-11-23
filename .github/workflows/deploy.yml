@@ -160,6 +160,7 @@ jobs:
           REMOTE_DIR: ${{ env.DEPLOY_REMOTE_DIR }}
           RSYNC_RSH: ${{ env.DEPLOY_RSYNC_RSH }}
           SSHPASS: ${{ env.DEPLOY_SSHPASS }}
+          GITHUB_SHA: ${{ github.sha }}
         run: bash deploy/ci-hostinger.sh postdeploy
 
       - name: Verify live health endpoint

@@ -45,10 +45,20 @@
         try {
             DB::connection()->getPdo();
 
+            $deployCommit = null;
+            $deployPath = storage_path('app/deploy-version.txt');
+            if (is_readable($deployPath)) {
+                $deployCommit = trim((string) file_get_contents($deployPath));
+                if ($deployCommit === '') {
+                    $deployCommit = null;
+                }
+            }
+
             return response()->json([
                 'status' => 'ok',
                 'database' => 'connected',
                 'users' => User::count(),
+                'git_commit' => $deployCommit,
             ]);
         } catch (\Throwable $e) {
             return response()->json([

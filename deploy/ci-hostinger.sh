@@ -132,6 +132,7 @@ do_sync() {
 
 do_postdeploy() {
   preflight_ssh
+  local deploy_sha="${GITHUB_SHA:-}"
   echo "==> Composer, migrate, cache on server..."
   ssh_cmd bash -s <<ENDSSH
 set -e
@@ -145,6 +146,12 @@ fi
 php artisan package:discover --ansi --no-interaction
 php artisan migrate --force --no-interaction
 php artisan optimize:clear --no-interaction
+mkdir -p storage/app
+if [ -n "$deploy_sha" ]; then
+  printf '%s' "$deploy_sha" > storage/app/deploy-version.txt
+elif command -v git >/dev/null 2>&1 && git rev-parse HEAD >/dev/null 2>&1; then
+  git rev-parse HEAD > storage/app/deploy-version.txt
+fi
 echo ""
 echo "=== API health ==="
 curl -4 -s -H "Accept: application/json" https://powerforceindustries.com/api/health | head -c 200 || true
